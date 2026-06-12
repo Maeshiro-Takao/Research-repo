@@ -1,0 +1,31 @@
+{
+  "best_value": 1.6479560532037336,
+  "best_params": {
+    "num_leaves": 89,
+    "max_depth": 4,
+    "learning_rate": 0.02498867389050204,
+    "min_data_in_leaf": 28,
+    "feature_fraction": 0.7057157923652463,
+    "bagging_fraction": 0.773218899914389,
+    "bagging_freq": 4,
+    "lambda_l1": 7.033323779744553,
+    "lambda_l2": 3.3116654330856563,
+    "num_boost_round": 235
+  },
+  "best_iteration": 221,
+  "n_trials": 50,
+  "features": [
+    "艇",
+    "登番",
+    "モーター",
+    "ボート",
+    "展示",
+    "展示順位",
+    "展示差",
+    "レース",
+    "風速",
+    "波高",
+    "天気",
+    "風向"
+  ]
+}

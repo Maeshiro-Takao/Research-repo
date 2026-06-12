@@ -6,20 +6,27 @@ import pandas as pd
 # 基本設定
 # ============================================================
 
-base_dir = Path("/Users/maeshirotakao/ボートデータ/競走成績")
+base_dir = Path(__file__).resolve().parent.parent / "元データ" / "競走成績"
+output_dir = Path(__file__).resolve().parent.parent / "編集データ"
 MARUGAME_CODE = "15"
-OUTPUT_FILE = "丸亀学習用_気象データ.csv"
+OUTPUT_FILE = output_dir / "丸亀テスト用_気象データ.csv"
 
 INVALID_RESULT = re.compile(r"^(F|L|K\d*|S[012]|\.)$")
+RACE_HEADER = re.compile(r"^(\d+)R\s+.+H\d+m")
 WEATHER_PATTERN = re.compile(
     r"(晴|曇り|雨|小雨|霧雨|雪)\s+風\s+(\S+)\s+(\d+)m\s+波\s+(\d+)cm"
 )
 DAY_PATTERN = re.compile(r"第\s*(\d+)日")
 
+COLUMNS = [
+    "開催日", "日目", "レース", "着", "艇",
+    "天気", "風向", "風速", "波高",
+]
+
 records = []
 
 # ============================================================
-# ファイル名日付
+# ユーティリティ
 # ============================================================
 
 def extract_date_from_filename(filename: str):
@@ -29,12 +36,8 @@ def extract_date_from_filename(filename: str):
 
     yy, mm, dd = m.groups()
     year = 2000 + int(yy)
-
     return f"{year}-{int(mm):02d}-{int(dd):02d}"
 
-# ============================================================
-# ファイルソート
-# ============================================================
 
 def file_sort_key(path: Path):
     m = re.match(r"K(\d{2})(\d{2})(\d{2})", path.name)
@@ -44,9 +47,6 @@ def file_sort_key(path: Path):
     yy, mm, dd = m.groups()
     return (int(yy), int(mm), int(dd))
 
-# ============================================================
-# 丸亀ブロック解析
-# ============================================================
 
 def extract_day_number(block_lines):
     for line in block_lines:
@@ -55,26 +55,30 @@ def extract_day_number(block_lines):
             return int(m.group(1))
     return None
 
-def is_invalid_result(parts):
-    return bool(INVALID_RESULT.fullmatch(parts[0]))
 
-def finalize_race(current_race, current_weather, valid_boat_count, race_invalid, current_date, day_number):
+def finalize_race(race_rows, current_weather, race_invalid, current_date, day_number, current_race):
     if (
-        current_race is None
-        or race_invalid
+        race_invalid
         or current_weather is None
-        or valid_boat_count != 6
+        or len(race_rows) != 6
         or day_number is None
         or current_date is None
+        or current_race is None
     ):
-        return None
+        return []
 
-    return {
-        "開催日": current_date,
-        "日目": day_number,
-        "レース": current_race,
-        **current_weather,
-    }
+    return [
+        {
+            "開催日": current_date,
+            "日目": day_number,
+            "レース": current_race,
+            "着": row["着"],
+            "艇": row["艇"],
+            **current_weather,
+        }
+        for row in race_rows
+    ]
+
 
 def process_marugame_block(block_lines, current_date):
     day_number = extract_day_number(block_lines)
@@ -84,28 +88,24 @@ def process_marugame_block(block_lines, current_date):
     block_records = []
     current_race = None
     current_weather = None
-    valid_boat_count = 0
+    race_rows = []
     race_invalid = False
 
     for line in block_lines:
         if not line:
             continue
 
-        race_match = re.match(r"^(\d+)R\s", line)
+        race_match = RACE_HEADER.match(line)
         if race_match:
-            record = finalize_race(
-                current_race,
-                current_weather,
-                valid_boat_count,
-                race_invalid,
-                current_date,
-                day_number,
+            block_records.extend(
+                finalize_race(
+                    race_rows, current_weather, race_invalid,
+                    current_date, day_number, current_race,
+                )
             )
-            if record:
-                block_records.append(record)
 
             current_race = int(race_match.group(1))
-            valid_boat_count = 0
+            race_rows = []
             race_invalid = False
 
             weather_match = WEATHER_PATTERN.search(line)
@@ -125,31 +125,35 @@ def process_marugame_block(block_lines, current_date):
             continue
 
         if parts[0] not in {"01", "02", "03", "04", "05", "06"}:
-            if is_invalid_result(parts):
+            if INVALID_RESULT.fullmatch(parts[0]):
                 race_invalid = True
             continue
 
-        if current_race is not None:
-            valid_boat_count += 1
+        if current_race is None:
+            continue
 
-    record = finalize_race(
-        current_race,
-        current_weather,
-        valid_boat_count,
-        race_invalid,
-        current_date,
-        day_number,
+        try:
+            race_rows.append({
+                "着": int(parts[0]),
+                "艇": int(parts[1]),
+            })
+        except ValueError:
+            continue
+
+    block_records.extend(
+        finalize_race(
+            race_rows, current_weather, race_invalid,
+            current_date, day_number, current_race,
+        )
     )
-    if record:
-        block_records.append(record)
-
     return block_records
+
 
 # ============================================================
 # メイン
 # ============================================================
 
-for year in range(14, 25):
+for year in range(25,26):
     year_dir = base_dir / f"{year}年"
     print("processing:", year_dir)
 
@@ -187,7 +191,8 @@ for year in range(14, 25):
 # 出力
 # ============================================================
 
-df = pd.DataFrame(records)
+df = pd.DataFrame(records, columns=COLUMNS)
+output_dir.mkdir(parents=True, exist_ok=True)
 df.to_csv(OUTPUT_FILE, index=False, encoding="UTF-8-sig")
 
 print("総件数:", len(df))
