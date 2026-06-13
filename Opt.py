@@ -18,9 +18,9 @@ MODEL_DIR = BASE_DIR / "models"
 MODEL_DIR.mkdir(parents=True, exist_ok=True)
 
 RACE_KEY = ["開催日", "日目", "レース"]
-EXCLUDE_COLUMNS = {"選手名", "日目", "開催日", "着"}
+EXCLUDE_COLUMNS = {"選手名", "日目", "開催日", "着", "レース"}
 RACE_BASE_COLUMNS = {
-    "艇", "登番", "モーター", "ボート", "展示", "レース", "風速", "波高", "天気", "風向",
+    "艇", "登番", "モーター", "ボート", "展示", "風速", "波高", "天気", "風向",
 }
 DERIVED_COLUMNS = ["展示順位", "展示差"]
 N_TRIALS = 50
@@ -76,7 +76,7 @@ def encode_features(df: pd.DataFrame, encoders: Optional[Dict] = None, fit: bool
 
 
 def drop_unused_columns(df: pd.DataFrame) -> pd.DataFrame:
-    cols = [c for c in ("選手名", "日目", "開催日") if c in df.columns]
+    cols = [c for c in ("選手名", "日目", "開催日", "レース") if c in df.columns]
     return df.drop(columns=cols)
 
 

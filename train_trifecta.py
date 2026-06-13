@@ -32,18 +32,17 @@ MODEL_DIR.mkdir(parents=True, exist_ok=True)
 RACE_KEY = ["開催日", "日目", "レース"]
 RACE_ROW_KEY = ["開催日", "日目", "レース", "艇"]
 
-RACE_EXCLUDE_COLUMNS = {"着", "選手名", "日目", "開催日"}
+RACE_EXCLUDE_COLUMNS = {"レース","着", "選手名", "日目", "開催日"}
 PLAYER_META_COLS = ["名前漢字", "算出期間自", "算出期間至"]
 RACE_BASE_FEATURES = [
     "艇", "登番", "モーター", "ボート", "展示",
-    "展示順位", "展示差", "レース", "風速", "波高", "天気", "風向",
+    "展示順位", "展示差", "風速", "波高", "天気", "風向",
 ]
 TOP_N_LIST = [1, 3, 5, 10, 30]
 SHAP_SAMPLE_SIZE = 2000
 
 FEATURES: list[str] = []
 CATEGORICAL = ["艇", "登番", "モーター", "ボート", "天気", "風向", "級"]
-FEATURE_LABELS: dict[str, str] = {}
 
 PARAMS = {
     "objective": "lambdarank",
@@ -51,36 +50,31 @@ PARAMS = {
     "ndcg_eval_at": [1, 3],
     "verbosity": -1,
     "seed": 42,
-    "num_leaves": 126,
+    "num_leaves": 49,
     "max_depth": 6,
-    "learning_rate": 0.02834061120740455,
-    "min_data_in_leaf": 123,
-    "feature_fraction": 0.6598699690730964,
-    "bagging_fraction": 0.6015757233072625,
+    "learning_rate": 0.026819398245087455,
+    "min_data_in_leaf": 153,
+    "feature_fraction": 0.6017431198339779,
+    "bagging_fraction": 0.9519930787255335,
     "bagging_freq": 1,
-    "lambda_l1": 0.2752764624363988,
-    "lambda_l2": 5.8874346025965005,
-    "num_boost_round": 215
+    "lambda_l1": 0.004497530361906638,
+    "lambda_l2": 0.21816851548813285,
+    "num_boost_round": 403
 }
 NUM_BOOST_ROUND = 235
 
 
 def configure_features(player_df: pd.DataFrame) -> None:
     """レースデータ・選手データの全特徴量を設定する"""
-    global FEATURES, FEATURE_LABELS
+    global FEATURES
 
     player_features = [
         c for c in player_df.columns
-        if c not in PLAYER_META_COLS and c != "登番"
+        if c not in PLAYER_META_COLS
+        and c != "登番"
+        and c not in RACE_EXCLUDE_COLUMNS
     ]
     FEATURES = RACE_BASE_FEATURES + player_features
-    FEATURE_LABELS = {
-        "展示": "展示タイム",
-        "レース": "レース番号",
-        "平均スタートタイミング": "平均ST",
-        **{f"{c}コース平均スタートタイミング": f"{c}コース平均ST" for c in range(1, 7)},
-        **{c: c for c in FEATURES},
-    }
 
 
 JAPANESE_FONT_CANDIDATES = [
@@ -213,12 +207,11 @@ def calc_trifecta_probs_from_scores(scores: np.ndarray) -> dict[tuple[int, int, 
 
 def run_shap_analysis(model: lgb.Booster, x_sample: pd.DataFrame):
     """ランク学習モデルの SHAP 分析"""
-    x_display = x_sample.rename(columns={c: FEATURE_LABELS.get(c, c) for c in x_sample.columns})
     shap_values = shap.TreeExplainer(model).shap_values(x_sample)
 
     bar_path = MODEL_DIR / "trifecta_shap_importance.png"
     plt.figure(figsize=(10, 6))
-    shap.summary_plot(shap_values, x_display, plot_type="bar", show=False)
+    shap.summary_plot(shap_values, x_sample, plot_type="bar", show=False)
     plt.title("特徴量の重要度（着順スコアへの影響）", fontsize=14)
     plt.tight_layout()
     plt.savefig(bar_path, dpi=150, bbox_inches="tight")
@@ -226,14 +219,14 @@ def run_shap_analysis(model: lgb.Booster, x_sample: pd.DataFrame):
 
     beeswarm_path = MODEL_DIR / "trifecta_shap_beeswarm.png"
     plt.figure(figsize=(10, 8))
-    shap.summary_plot(shap_values, x_display, show=False)
+    shap.summary_plot(shap_values, x_sample, show=False)
     plt.title("特徴量の影響方向（赤=有利, 青=不利）", fontsize=14)
     plt.tight_layout()
     plt.savefig(beeswarm_path, dpi=150, bbox_inches="tight")
     plt.close()
 
     importance = pd.DataFrame({
-        "特徴量": x_display.columns,
+        "特徴量": x_sample.columns,
         "重要度": np.abs(shap_values).mean(axis=0),
     }).sort_values("重要度", ascending=False)
     csv_path = MODEL_DIR / "trifecta_shap_importance.csv"
