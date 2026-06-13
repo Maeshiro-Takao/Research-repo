@@ -18,30 +18,35 @@ MODEL_DIR = BASE_DIR / "models"
 MODEL_DIR.mkdir(parents=True, exist_ok=True)
 
 RACE_KEY = ["開催日", "日目", "レース"]
+EXCLUDE_COLUMNS = {"選手名", "日目", "開催日", "着"}
+RACE_BASE_COLUMNS = {
+    "艇", "登番", "モーター", "ボート", "展示", "レース", "風速", "波高", "天気", "風向",
+}
+DERIVED_COLUMNS = ["展示順位", "展示差"]
 N_TRIALS = 50
 
-# 学習に使わない列（選手名・日目は特徴量に含めない）
-EXCLUDE_COLUMNS = ["選手名", "日目"]
-
-FEATURE_COLUMNS = [
-    "艇",
-    "登番",
-    "モーター",
-    "ボート",
-    "展示",
-    "展示順位",
-    "展示差",
-    "レース",
-    "風速",
-    "波高",
-    "天気",
-    "風向",
-]
-CATEGORICAL_FEATURES = ["艇", "登番", "モーター", "ボート", "天気", "風向"]
+FEATURE_COLUMNS: list[str] = []
+CATEGORICAL_FEATURES = ["艇", "登番", "モーター", "ボート", "天気", "風向", "級"]
 
 # ============================================================
 # 前処理
 # ============================================================
+
+def configure_features(df: pd.DataFrame) -> None:
+    """結合済みデータから全特徴量列を設定する"""
+    global FEATURE_COLUMNS
+
+    exclude = EXCLUDE_COLUMNS
+    player_columns = [
+        c for c in df.columns
+        if c not in exclude and c not in RACE_BASE_COLUMNS
+    ]
+    FEATURE_COLUMNS = (
+        [c for c in RACE_BASE_COLUMNS if c in df.columns]
+        + DERIVED_COLUMNS
+        + player_columns
+    )
+
 
 def add_features(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
@@ -55,6 +60,8 @@ def encode_features(df: pd.DataFrame, encoders: Optional[Dict] = None, fit: bool
     encoded = df.copy()
 
     for col in CATEGORICAL_FEATURES:
+        if col not in encoded.columns:
+            continue
         if fit:
             encoders[col] = {
                 v: i for i, v in enumerate(encoded[col].astype(str).unique())
@@ -69,22 +76,15 @@ def encode_features(df: pd.DataFrame, encoders: Optional[Dict] = None, fit: bool
 
 
 def drop_unused_columns(df: pd.DataFrame) -> pd.DataFrame:
-    """選手名・日目を削除（日目は特徴量計算後に落とす）"""
-    cols = [c for c in EXCLUDE_COLUMNS if c in df.columns]
+    cols = [c for c in ("選手名", "日目", "開催日") if c in df.columns]
     return df.drop(columns=cols)
 
 
 def load_data():
-    df_train = pd.read_csv(TRAIN_DATA_PATH)
-    df_valid = pd.read_csv(VALID_DATA_PATH)
+    df_train = pd.read_csv(TRAIN_DATA_PATH, low_memory=False)
+    df_valid = pd.read_csv(VALID_DATA_PATH, low_memory=False)
+    configure_features(df_train)
 
-    # 選手名は最初から削除
-    if "選手名" in df_train.columns:
-        df_train = df_train.drop(columns="選手名")
-    if "選手名" in df_valid.columns:
-        df_valid = df_valid.drop(columns="選手名")
-
-    # 日目は展示順位・展示差の集計に使ってから削除
     df_train = drop_unused_columns(add_features(df_train))
     df_valid = drop_unused_columns(add_features(df_valid))
 
@@ -94,13 +94,13 @@ def load_data():
     train_set = lgb.Dataset(
         x_train,
         label=y_train,
-        categorical_feature=CATEGORICAL_FEATURES,
+        categorical_feature=[c for c in CATEGORICAL_FEATURES if c in FEATURE_COLUMNS],
         free_raw_data=False,
     )
     valid_set = lgb.Dataset(
         x_valid,
         label=y_valid,
-        categorical_feature=CATEGORICAL_FEATURES,
+        categorical_feature=[c for c in CATEGORICAL_FEATURES if c in FEATURE_COLUMNS],
         reference=train_set,
         free_raw_data=False,
     )
@@ -186,9 +186,12 @@ def train_best_model(train_set, valid_set, best_params: dict) -> lgb.Booster:
 
 def main():
     print("データ読み込み...")
+    print(f"  {TRAIN_DATA_PATH.name}")
+    print(f"  {VALID_DATA_PATH.name}")
     train_set, valid_set, encoders, x_train, y_train, x_valid, y_valid = load_data()
     print(f"  訓練: {len(x_train)} 行")
     print(f"  検証: {len(x_valid)} 行")
+    print(f"  特徴量数: {len(FEATURE_COLUMNS)}")
 
     print(f"\nOptuna 最適化開始（{N_TRIALS} trials）...")
     study = optuna.create_study(direction="minimize")

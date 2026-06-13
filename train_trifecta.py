@@ -32,14 +32,18 @@ MODEL_DIR.mkdir(parents=True, exist_ok=True)
 RACE_KEY = ["開催日", "日目", "レース"]
 RACE_ROW_KEY = ["開催日", "日目", "レース", "艇"]
 
-PLAYER_META_COLS = [
-    "名前漢字", "年", "期", "算出期間自", "算出期間至", "出身地", "生年月日_変換",
-]
-PLAYER_COURSE_STAT_SUFFIXES = [
-    "進入回数", "複勝率", "平均スタートタイミング", "平均スタート順位",
+RACE_EXCLUDE_COLUMNS = {"着", "選手名", "日目", "開催日"}
+PLAYER_META_COLS = ["名前漢字", "算出期間自", "算出期間至"]
+RACE_BASE_FEATURES = [
+    "艇", "登番", "モーター", "ボート", "展示",
+    "展示順位", "展示差", "レース", "風速", "波高", "天気", "風向",
 ]
 TOP_N_LIST = [1, 3, 5, 10, 30]
 SHAP_SAMPLE_SIZE = 2000
+
+FEATURES: list[str] = []
+CATEGORICAL = ["艇", "登番", "モーター", "ボート", "天気", "風向", "級"]
+FEATURE_LABELS: dict[str, str] = {}
 
 PARAMS = {
     "objective": "lambdarank",
@@ -47,31 +51,37 @@ PARAMS = {
     "ndcg_eval_at": [1, 3],
     "verbosity": -1,
     "seed": 42,
-    "num_leaves": 89,
-    "max_depth": 4,
-    "learning_rate": 0.02498867389050204,
-    "min_data_in_leaf": 28,
-    "feature_fraction": 0.7057157923652463,
-    "bagging_fraction": 0.773218899914389,
-    "bagging_freq": 4,
-    "lambda_l1": 7.033323779744553,
-    "lambda_l2": 3.3116654330856563,
+    "num_leaves": 126,
+    "max_depth": 6,
+    "learning_rate": 0.02834061120740455,
+    "min_data_in_leaf": 123,
+    "feature_fraction": 0.6598699690730964,
+    "bagging_fraction": 0.6015757233072625,
+    "bagging_freq": 1,
+    "lambda_l1": 0.2752764624363988,
+    "lambda_l2": 5.8874346025965005,
+    "num_boost_round": 215
 }
 NUM_BOOST_ROUND = 235
 
-FEATURES = [
-    "艇", "登番", "モーター", "ボート", "展示",
-    "展示順位", "展示差", "レース", "風速", "波高", "天気", "風向",
-    "級", "前期級", "前々期級", "前々々期級",
-    "身長", "体重", "勝率", "複勝率", "平均スタートタイミング",
-    "1着回数", "2着回数", "出走回数", "優出回数", "優勝回数",
-    "前期能力指数", "今期能力指数", "養成期",
-    "コース進入回数", "コース複勝率", "コース平均スタートタイミング", "コース平均スタート順位",
-]
-CATEGORICAL = [
-    "艇", "登番", "モーター", "ボート", "天気", "風向",
-    "級", "前期級", "前々期級", "前々々期級",
-]
+
+def configure_features(player_df: pd.DataFrame) -> None:
+    """レースデータ・選手データの全特徴量を設定する"""
+    global FEATURES, FEATURE_LABELS
+
+    player_features = [
+        c for c in player_df.columns
+        if c not in PLAYER_META_COLS and c != "登番"
+    ]
+    FEATURES = RACE_BASE_FEATURES + player_features
+    FEATURE_LABELS = {
+        "展示": "展示タイム",
+        "レース": "レース番号",
+        "平均スタートタイミング": "平均ST",
+        **{f"{c}コース平均スタートタイミング": f"{c}コース平均ST" for c in range(1, 7)},
+        **{c: c for c in FEATURES},
+    }
+
 
 JAPANESE_FONT_CANDIDATES = [
     "Hiragino Sans",
@@ -85,42 +95,6 @@ JAPANESE_FONT_CANDIDATES = [
     "IPAGothic",
     "MS Gothic",
 ]
-
-FEATURE_LABELS = {
-    "艇": "艇番",
-    "登番": "登番",
-    "モーター": "モーター",
-    "ボート": "ボート",
-    "展示": "展示タイム",
-    "展示順位": "展示順位",
-    "展示差": "展示差",
-    "レース": "レース番号",
-    "風速": "風速",
-    "波高": "波高",
-    "天気": "天気",
-    "風向": "風向",
-    "級": "級",
-    "前期級": "前期級",
-    "前々期級": "前々期級",
-    "前々々期級": "前々々期級",
-    "身長": "身長",
-    "体重": "体重",
-    "勝率": "勝率",
-    "複勝率": "複勝率",
-    "平均スタートタイミング": "平均ST",
-    "1着回数": "1着回数",
-    "2着回数": "2着回数",
-    "出走回数": "出走回数",
-    "優出回数": "優出回数",
-    "優勝回数": "優勝回数",
-    "前期能力指数": "前期能力指数",
-    "今期能力指数": "今期能力指数",
-    "養成期": "養成期",
-    "コース進入回数": "コース進入回数",
-    "コース複勝率": "コース複勝率",
-    "コース平均スタートタイミング": "コース平均ST",
-    "コース平均スタート順位": "コース平均ST順位",
-}
 
 def setup_japanese_font() -> str | None:
     """利用可能な日本語フォントを設定する"""
@@ -141,59 +115,46 @@ def setup_japanese_font() -> str | None:
     return None
 
 
-def add_course_player_features(df: pd.DataFrame) -> pd.DataFrame:
-    """艇番に対応するコース別成績を特徴量として追加する"""
-    df = df.copy()
-    boat_idx = df["艇"].astype(int).clip(1, 6).to_numpy() - 1
-    row_idx = np.arange(len(df))
-
-    for suffix in PLAYER_COURSE_STAT_SUFFIXES:
-        course_cols = [f"{c}コース{suffix}" for c in range(1, 7)]
-        course_vals = df[course_cols].to_numpy()
-        df[f"コース{suffix}"] = course_vals[row_idx, boat_idx]
-
-    return df
-
-
 def merge_player_data(race_df: pd.DataFrame, player_df: pd.DataFrame) -> pd.DataFrame:
     """登番と開催日（算出期間）で選手データを結合する"""
     race = race_df.copy()
     player = player_df.copy()
     race["開催日"] = pd.to_datetime(race["開催日"])
-    player["算出期間自"] = pd.to_datetime(player["算出期間自"])
-    player["算出期間至"] = pd.to_datetime(player["算出期間至"])
 
-    player_cols = [c for c in player.columns if c != "登番"]
-    merged = race.merge(player, on="登番", how="left")
-    period_match = (
-        merged["算出期間自"].notna()
-        & (merged["開催日"] >= merged["算出期間自"])
-        & (merged["開催日"] <= merged["算出期間至"])
-    )
-    matched = (
-        merged.loc[period_match, RACE_ROW_KEY + player_cols]
-        .drop_duplicates(RACE_ROW_KEY)
-    )
-    out = race.merge(matched, on=RACE_ROW_KEY, how="left")
-    out = add_course_player_features(out)
+    if {"算出期間自", "算出期間至"}.issubset(player.columns):
+        player["算出期間自"] = pd.to_datetime(player["算出期間自"])
+        player["算出期間至"] = pd.to_datetime(player["算出期間至"])
+        player_cols = [c for c in player.columns if c != "登番"]
+        merged = race.merge(player, on="登番", how="left")
+        period_match = (
+            merged["算出期間自"].notna()
+            & (merged["開催日"] >= merged["算出期間自"])
+            & (merged["開催日"] <= merged["算出期間至"])
+        )
+        matched = (
+            merged.loc[period_match, RACE_ROW_KEY + player_cols]
+            .drop_duplicates(RACE_ROW_KEY)
+        )
+        out = race.merge(matched, on=RACE_ROW_KEY, how="left")
+    else:
+        player = player.drop_duplicates(subset=["登番"], keep="last")
+        player_cols = [c for c in player.columns if c != "登番"]
+        out = race.merge(player, on="登番", how="left")
 
-    drop_cols = [
-        *PLAYER_META_COLS,
-        *[f"{c}コース{suffix}" for c in range(1, 7) for suffix in PLAYER_COURSE_STAT_SUFFIXES],
-        *[f"{c}コース{rank}着回数" for c in range(1, 7) for rank in range(1, 7)],
-    ]
-    return out.drop(columns=[c for c in drop_cols if c in out.columns])
+    return out.drop(columns=[c for c in PLAYER_META_COLS if c in out.columns])
 
 
 def load_data() -> pd.DataFrame:
     print(f"データ読み込み: {RACE_DATA_PATH.name}, {PLAYER_DATA_PATH.name}")
     race_df = pd.read_csv(RACE_DATA_PATH)
     player_df = pd.read_csv(PLAYER_DATA_PATH)
+    configure_features(player_df)
     df = merge_player_data(race_df, player_df)
 
-    matched = df["級"].notna().sum()
+    matched = df["級"].notna().sum() if "級" in df.columns else 0
     print(f"  全体: {len(df)} 行 / {len(df) // 6} レース")
     print(f"  選手データ結合: {matched} 行 ({matched / len(df):.1%})")
+    print(f"  特徴量数: {len(FEATURES)}")
     return df
 
 
@@ -252,7 +213,7 @@ def calc_trifecta_probs_from_scores(scores: np.ndarray) -> dict[tuple[int, int, 
 
 def run_shap_analysis(model: lgb.Booster, x_sample: pd.DataFrame):
     """ランク学習モデルの SHAP 分析"""
-    x_display = x_sample.rename(columns=FEATURE_LABELS)
+    x_display = x_sample.rename(columns={c: FEATURE_LABELS.get(c, c) for c in x_sample.columns})
     shap_values = shap.TreeExplainer(model).shap_values(x_sample)
 
     bar_path = MODEL_DIR / "trifecta_shap_importance.png"
