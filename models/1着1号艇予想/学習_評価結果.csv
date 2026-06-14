@@ -1,0 +1,2 @@
+﻿label,n_races,first_hit_rate,exacta_hit_rate,trifecta_top1_rate,trifecta_avg_neg_log_prob,trifecta_top3_rate,trifecta_top5_rate,trifecta_top10_rate,trifecta_top30_rate
+1着1号艇予想（学習データ）,12848,0.851961394769614,0.5398505603985057,0.2654887920298879,3.2534906870878553,0.4410024906600249,0.5492683686176837,0.7052459526774595,0.9162515566625156

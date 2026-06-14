@@ -18,15 +18,15 @@ MODEL_DIR = BASE_DIR / "models"
 MODEL_DIR.mkdir(parents=True, exist_ok=True)
 
 RACE_KEY = ["開催日", "日目", "レース"]
-EXCLUDE_COLUMNS = {"選手名", "日目", "開催日", "着", "レース"}
+EXCLUDE_COLUMNS = {"レース", "着", "選手名", "日目", "開催日", "登番", "モーター", "ボート"}
 RACE_BASE_COLUMNS = {
-    "艇", "登番", "モーター", "ボート", "展示", "風速", "波高", "天気", "風向",
+    "艇", "展示", "風速", "波高", "天気", "風向",
 }
 DERIVED_COLUMNS = ["展示順位", "展示差"]
 N_TRIALS = 50
 
 FEATURE_COLUMNS: list[str] = []
-CATEGORICAL_FEATURES = ["艇", "登番", "モーター", "ボート", "天気", "風向", "級"]
+CATEGORICAL_FEATURES = ["艇", "天気", "風向", "級"]
 
 # ============================================================
 # 前処理
