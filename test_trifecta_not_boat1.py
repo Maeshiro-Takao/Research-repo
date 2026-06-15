@@ -1,10 +1,3 @@
-"""
-1着1号艇以外予想モデルで丸亀テスト用データを検証する（独立スクリプト）。
-
-使い方:
-    python train_trifecta_not_boat1.py
-    python test_trifecta_not_boat1.py
-"""
 from __future__ import annotations
 
 from pathlib import Path
@@ -15,8 +8,8 @@ import numpy as np
 import pandas as pd
 
 BASE_DIR = Path(__file__).resolve().parent
-RACE_DATA_PATH = BASE_DIR / "編集データ" / "丸亀テスト用_レースデータ.csv"
-PLAYER_DATA_PATH = BASE_DIR / "編集データ" / "丸亀テスト用_選手データ.csv"
+RACE_DATA_PATH = BASE_DIR / "レースデータ" / "丸亀テスト用_レースデータ.csv"
+PLAYER_DATA_PATH = BASE_DIR / "レースデータ" / "丸亀テスト用_選手データ.csv"
 OUTPUT_DIR = BASE_DIR / "models" / "1着1号艇以外予想"
 
 MODEL_PATH = OUTPUT_DIR / "lgbm_trifecta_not_boat1_model.txt"
@@ -179,7 +172,7 @@ def main():
             ),
         })
 
-    print(f"\n=== 3連単評価 (テスト / 1着1号艇以外予想) ===")
+    print(f"\n=== 3連単評価 ===")
     print(f"  レース数: {n_races}")
     for n in TOP_N_LIST:
         print(f"  3連単 TOP{n} 的中率: {hits[n] / n_races:.2%}")

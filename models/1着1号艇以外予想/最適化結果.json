@@ -1,19 +1,19 @@
 {
   "model": "1着1号艇以外予想",
   "n_races": 11327,
-  "best_value": 0.992741041562441,
+  "best_value": 0.9842236768165955,
   "best_metric": "train ndcg@1",
   "best_params": {
-    "num_leaves": 128,
-    "max_depth": 11,
-    "learning_rate": 0.16842110306032781,
-    "min_data_in_leaf": 59,
-    "feature_fraction": 0.8233106812842984,
-    "bagging_fraction": 0.8633936470213464,
-    "bagging_freq": 2,
-    "lambda_l1": 0.011671347450029436,
-    "lambda_l2": 0.005001612935987796,
-    "num_boost_round": 499
+    "num_leaves": 126,
+    "max_depth": 12,
+    "learning_rate": 0.17417847935039643,
+    "min_data_in_leaf": 97,
+    "feature_fraction": 0.6292289903703154,
+    "bagging_fraction": 0.8626414967068359,
+    "bagging_freq": 4,
+    "lambda_l1": 0.06530256963893566,
+    "lambda_l2": 0.12082986684740414,
+    "num_boost_round": 416
   },
   "n_trials": 50,
   "features": [

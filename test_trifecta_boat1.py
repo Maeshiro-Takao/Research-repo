@@ -1,10 +1,3 @@
-"""
-1着1号艇予想モデルで丸亀テスト用データを検証する（独立スクリプト）。
-
-使い方:
-    python train_trifecta_boat1.py
-    python test_trifecta_boat1.py
-"""
 from __future__ import annotations
 
 from pathlib import Path
@@ -15,8 +8,8 @@ import numpy as np
 import pandas as pd
 
 BASE_DIR = Path(__file__).resolve().parent
-RACE_DATA_PATH = BASE_DIR / "編集データ" / "丸亀テスト用_レースデータ.csv"
-PLAYER_DATA_PATH = BASE_DIR / "編集データ" / "丸亀テスト用_選手データ.csv"
+RACE_DATA_PATH = BASE_DIR / "レースデータ" / "丸亀テスト用_レースデータ.csv"
+PLAYER_DATA_PATH = BASE_DIR / "レースデータ" / "丸亀テスト用_選手データ.csv"
 OUTPUT_DIR = BASE_DIR / "models" / "1着1号艇予想"
 
 MODEL_PATH = OUTPUT_DIR / "lgbm_trifecta_boat1_model.txt"
@@ -26,6 +19,7 @@ EVALUATION_CSV_PATH = OUTPUT_DIR / "テスト_評価結果.csv"
 
 RACE_KEY = ["開催日", "日目", "レース"]
 RACE_ROW_KEY = ["開催日", "日目", "レース", "艇"]
+TARGET_BOAT = 1
 PLAYER_META_COLS = ["名前漢字", "算出期間自", "算出期間至"]
 CATEGORICAL = ["天気", "風向", "級"]
 TOP_N_LIST = [1, 3, 5, 10, 30]
@@ -92,9 +86,11 @@ def prepare_race(
     features: list[str],
     encoders: dict,
 ) -> tuple[pd.DataFrame, np.ndarray]:
+    """2〜6号艇のみを特徴量化する"""
     df = race_df.copy()
     df["展示順位"] = df.groupby(RACE_KEY)["展示"].rank(method="min")
     df["展示差"] = df["展示"] - df.groupby(RACE_KEY)["展示"].transform("mean")
+    df = df.loc[df["艇"].astype(int) != TARGET_BOAT].copy()
     boat_numbers = df["艇"].astype(int).values
     for col in CATEGORICAL:
         if col in encoders:
@@ -105,21 +101,21 @@ def prepare_race(
     return df[features], boat_numbers
 
 
-def calc_trifecta_probs(scores: np.ndarray) -> dict[tuple[int, int, int], float]:
-    n = len(scores)
-    exp_scores = np.exp(scores - scores.max())
+def calc_trifecta_probs_boat1_fixed(
+    boat_scores: dict[int, float],
+) -> dict[tuple[int, int, int], float]:
+    boats = sorted(boat_scores)
+    max_score = max(boat_scores.values())
+    exp_scores = {b: np.exp(boat_scores[b] - max_score) for b in boats}
+    total = sum(exp_scores.values())
     results: dict[tuple[int, int, int], float] = {}
-    for i in range(n):
-        p1 = max(exp_scores[i] / exp_scores.sum(), 1e-12)
-        rem1 = [b for b in range(n) if b != i]
-        sum_rem1 = exp_scores[rem1].sum()
-        for j in rem1:
-            p2 = max(exp_scores[j] / sum_rem1, 1e-12)
-            rem2 = [b for b in rem1 if b != j]
-            sum_rem2 = exp_scores[rem2].sum()
-            for k in rem2:
-                p3 = max(exp_scores[k] / sum_rem2, 1e-12)
-                results[(i + 1, j + 1, k + 1)] = p1 * p2 * p3
+    for second in boats:
+        p2 = max(exp_scores[second] / total, 1e-12)
+        remaining = [b for b in boats if b != second]
+        rem_total = sum(exp_scores[b] for b in remaining)
+        for third in remaining:
+            p3 = max(exp_scores[third] / rem_total, 1e-12)
+            results[(TARGET_BOAT, second, third)] = p2 * p3
     return results
 
 
@@ -133,14 +129,21 @@ def predict_race_trifecta(
     race_df: pd.DataFrame,
     encoders: dict,
 ) -> tuple[tuple[int, int, int], list[tuple[tuple[int, int, int], float]]]:
+    if len(race_df) != 6:
+        raise ValueError("6艇揃ったレースが必要です")
+
     features = model.feature_name()
     x, boat_numbers = prepare_race(race_df, features, encoders)
     scores = model.predict(x)
-    score_arr = np.zeros(6)
-    for idx, boat in enumerate(boat_numbers):
-        score_arr[boat - 1] = scores[idx]
-    ranking = sorted(calc_trifecta_probs(score_arr).items(), key=lambda x: x[1], reverse=True)
-    return ranking[0][0], ranking
+    boat_scores = {int(boat): float(score) for boat, score in zip(boat_numbers, scores)}
+    ranking = sorted(
+        calc_trifecta_probs_boat1_fixed(boat_scores).items(),
+        key=lambda x: x[1],
+        reverse=True,
+    )
+    pred_top = ranking[0][0]
+    assert pred_top[0] == TARGET_BOAT
+    return pred_top, ranking
 
 
 def main():
@@ -179,14 +182,14 @@ def main():
             ),
         })
 
-    print(f"\n=== 3連単評価 (テスト / 1着1号艇予想) ===")
+    print(f"\n=== 3連単評価 ===")
     print(f"  レース数: {n_races}")
     for n in TOP_N_LIST:
         print(f"  3連単 TOP{n} 的中率: {hits[n] / n_races:.2%}")
     print(f"  1着艇番 的中率: {first_hits / n_races:.2%}")
     print(f"  2連単 的中率:   {second_hits / n_races:.2%}")
     print(f"  3連単 的中率:   {hits[1] / n_races:.2%}")
-    print(f"  真の3連単 平均-log確率: {logloss_sum / n_races:.4f}")
+    print(f"  平均-log確率: {logloss_sum / n_races:.4f}")
 
     metrics = {
         "label": "テスト / 1着1号艇予想",

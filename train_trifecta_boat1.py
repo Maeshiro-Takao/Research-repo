@@ -1,3 +1,9 @@
+"""
+1号艇が1着のレースを対象に、2〜6号艇のランキングから3連単（1-◯-◯）を予測する。
+
+- 学習: 1号艇を除外し、2〜6号艇のみを LambdaRank で順位付け
+- 推論: 1号艇を1着固定し、モデル出力の上位2艇を2着・3着とする
+"""
 from __future__ import annotations
 
 import json
@@ -16,8 +22,8 @@ import pandas as pd
 import shap
 
 BASE_DIR = Path(__file__).resolve().parent
-RACE_DATA_PATH = BASE_DIR / "編集データ" / "丸亀学習用_レースデータ.csv"
-PLAYER_DATA_PATH = BASE_DIR / "編集データ" / "丸亀学習用_選手データ.csv"
+RACE_DATA_PATH = BASE_DIR / "レースデータ" / "丸亀学習用_レースデータ.csv"
+PLAYER_DATA_PATH = BASE_DIR / "レースデータ" / "丸亀学習用_選手データ.csv"
 OUTPUT_DIR = BASE_DIR / "models" / "1着1号艇予想"
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -32,6 +38,7 @@ SHAP_IMPORTANCE_CSV_PATH = OUTPUT_DIR / "特徴量重要度.csv"
 
 RACE_KEY = ["開催日", "日目", "レース"]
 RACE_ROW_KEY = ["開催日", "日目", "レース", "艇"]
+TARGET_BOAT = 1  # 1号艇を1着固定する前提
 
 RACE_EXCLUDE_COLUMNS = {"レース", "着", "選手名", "日目", "開催日", "登番", "モーター", "ボート", "艇"}
 PLAYER_META_COLS = ["名前漢字", "算出期間自", "算出期間至"]
@@ -133,7 +140,7 @@ def load_data() -> pd.DataFrame:
     df = filter_target_races(df)
 
     matched = df["級"].notna().sum() if "級" in df.columns else 0
-    print(f"  対象: {len(df)} 行 / {len(df) // 6} レース（1着=1号艇）")
+    print(f"  対象: {len(df)} 行 / {len(df) // 6} レース（1着=1号艇、学習は2〜6号艇）")
     print(f"  選手データ結合: {matched} 行 ({matched / len(df):.1%})")
     print(f"  特徴量数: {len(FEATURES)}")
     return df
@@ -156,12 +163,19 @@ def filter_target_races(df: pd.DataFrame) -> pd.DataFrame:
     return pd.concat(parts, ignore_index=True) if parts else df.iloc[0:0]
 
 
+def exclude_boat1(df: pd.DataFrame) -> pd.DataFrame:
+    """1号艇を除外し、2〜6号艇のみを残す"""
+    return df.loc[df["艇"].astype(int) != TARGET_BOAT].copy()
+
+
 def prepare(df: pd.DataFrame, encoders=None):
+    """2〜6号艇のみを対象にランキング学習用データを作成する"""
     df = filter_complete_races(df)
     df = df.sort_values(RACE_KEY).reset_index(drop=True)
-    boat_numbers = df["艇"].astype(int).values
     df["展示順位"] = df.groupby(RACE_KEY)["展示"].rank(method="min")
     df["展示差"] = df["展示"] - df.groupby(RACE_KEY)["展示"].transform("mean")
+    df = exclude_boat1(df)
+    boat_numbers = df["艇"].astype(int).values
     groups = df.groupby(RACE_KEY, sort=False).size().tolist()
     df = df.drop(columns=["日目", "選手名"], errors="ignore")
     encoders = encoders or {}
@@ -170,6 +184,7 @@ def prepare(df: pd.DataFrame, encoders=None):
             encoders[col] = {v: i for i, v in enumerate(df[col].astype(str).unique())}
         df[col] = df[col].astype(str).map(encoders[col]).fillna(-1).astype(int)
     x = df[FEATURES]
+    # 着順が早いほどラベルが大きい（例: 2着=5, 3着=4, ... 6着=1）
     y = 7 - df["着"].astype(int)
     return x, y, groups, encoders, boat_numbers
 
@@ -230,7 +245,7 @@ def optimize_model(df: pd.DataFrame, encoders: dict):
     if n_races < 100:
         raise ValueError(f"レース数が少なすぎます: {n_races}")
 
-    print(f"  Optuna用データ: 全 {n_races} レース")
+    print(f"  Optuna用データ: 全 {n_races} レース（各5艇）")
     train_set, x_train = build_rank_dataset(df, encoders)
 
     print(f"  Optuna 最適化開始（{N_TRIALS} trials）...")
@@ -258,35 +273,52 @@ def get_actual_trifecta(race_df: pd.DataFrame) -> tuple[int, int, int]:
     return tuple(top3["艇"].astype(int).tolist())  # type: ignore[return-value]
 
 
-def calc_trifecta_probs_from_scores(scores: np.ndarray) -> dict[tuple[int, int, int], float]:
-    n = len(scores)
-    exp_scores = np.exp(scores - scores.max())
+def calc_trifecta_probs_boat1_fixed(
+    boat_scores: dict[int, float],
+) -> dict[tuple[int, int, int], float]:
+    """
+    1号艇を1着固定し、2〜6号艇のスコアから3連単確率を算出する。
+    出力は必ず (1, j, k) 形式（j, k は 2〜6号艇）。
+    """
+    boats = sorted(boat_scores)
+    if len(boats) != 5:
+        raise ValueError(f"2〜6号艇のスコアが5艇分必要です: {len(boats)}艇")
+
+    max_score = max(boat_scores.values())
+    exp_scores = {b: np.exp(boat_scores[b] - max_score) for b in boats}
+    total = sum(exp_scores.values())
     results: dict[tuple[int, int, int], float] = {}
-    for i in range(n):
-        p1 = max(exp_scores[i] / exp_scores.sum(), 1e-12)
-        rem1 = [b for b in range(n) if b != i]
-        sum_rem1 = exp_scores[rem1].sum()
-        for j in rem1:
-            p2 = max(exp_scores[j] / sum_rem1, 1e-12)
-            rem2 = [b for b in rem1 if b != j]
-            sum_rem2 = exp_scores[rem2].sum()
-            for k in rem2:
-                p3 = max(exp_scores[k] / sum_rem2, 1e-12)
-                results[(i + 1, j + 1, k + 1)] = p1 * p2 * p3
+
+    for second in boats:
+        p2 = max(exp_scores[second] / total, 1e-12)
+        remaining = [b for b in boats if b != second]
+        rem_total = sum(exp_scores[b] for b in remaining)
+        for third in remaining:
+            p3 = max(exp_scores[third] / rem_total, 1e-12)
+            results[(TARGET_BOAT, second, third)] = p2 * p3
+
     return results
 
 
+
 def predict_race_trifecta(model, race_df, encoders):
+    """1号艇を1着固定し、2〜6号艇の順位から3連単を予測する"""
+    race_df = filter_complete_races(race_df)
+    if len(race_df) != 6:
+        raise ValueError("6艇揃ったレースが必要です")
+
     x, _, _, _, boat_numbers = prepare(race_df, encoders)
     scores = model.predict(x)
-    score_arr = np.zeros(6)
-    for idx, boat in enumerate(boat_numbers):
-        score_arr[boat - 1] = scores[idx]
+    boat_scores = {int(boat): float(score) for boat, score in zip(boat_numbers, scores)}
+
     ranking = sorted(
-        calc_trifecta_probs_from_scores(score_arr).items(),
-        key=lambda x: x[1], reverse=True,
+        calc_trifecta_probs_boat1_fixed(boat_scores).items(),
+        key=lambda x: x[1],
+        reverse=True,
     )
-    return ranking[0][0], ranking
+    pred_top = ranking[0][0]
+    assert pred_top[0] == TARGET_BOAT, f"1号艇以外が1着になりました: {pred_top}"
+    return pred_top, ranking
 
 
 def evaluate_trifecta(model, df, encoders, label, output_path: Path):
@@ -303,7 +335,7 @@ def evaluate_trifecta(model, df, encoders, label, output_path: Path):
         for n in TOP_N_LIST:
             if actual in [c for c, _ in ranking[:n]]:
                 hits[n] += 1
-        first_hits += pred_top[0] == actual[0]
+        first_hits += pred_top[0] == actual[0]  # 予測1着は常に1号艇
         second_hits += pred_top[:2] == actual[:2]
         logloss_sum += -np.log(max(prob_map.get(actual, 1e-12), 1e-12))
         n_races += 1
@@ -358,14 +390,14 @@ def run_shap_analysis(model, x_sample):
 
     plt.figure(figsize=(10, 6))
     shap.summary_plot(shap_values, x_sample, plot_type="bar", show=False)
-    plt.title("特徴量（1着1号艇予想）", fontsize=14)
+    plt.title("特徴量", fontsize=14)
     plt.tight_layout()
     plt.savefig(SHAP_IMPORTANCE_PNG_PATH, dpi=150, bbox_inches="tight")
     plt.close()
 
     plt.figure(figsize=(10, 8))
     shap.summary_plot(shap_values, x_sample, show=False)
-    plt.title("特徴量（1着1号艇予想）", fontsize=14)
+    plt.title("特徴量", fontsize=14)
     plt.tight_layout()
     plt.savefig(SHAP_BEESWARM_PNG_PATH, dpi=150, bbox_inches="tight")
     plt.close()

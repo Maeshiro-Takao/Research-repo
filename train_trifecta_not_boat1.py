@@ -1,9 +1,3 @@
-"""
-1着が1号艇以外のレース用 LambdaRank モデルを学習する（独立スクリプト）。
-
-使い方:
-    python train_trifecta_not_boat1.py
-"""
 from __future__ import annotations
 
 import json
@@ -22,8 +16,8 @@ import pandas as pd
 import shap
 
 BASE_DIR = Path(__file__).resolve().parent
-RACE_DATA_PATH = BASE_DIR / "編集データ" / "丸亀学習用_レースデータ.csv"
-PLAYER_DATA_PATH = BASE_DIR / "編集データ" / "丸亀学習用_選手データ.csv"
+RACE_DATA_PATH = BASE_DIR / "レースデータ" / "丸亀学習用_レースデータ.csv"
+PLAYER_DATA_PATH = BASE_DIR / "レースデータ" / "丸亀学習用_選手データ.csv"
 OUTPUT_DIR = BASE_DIR / "models" / "1着1号艇以外予想"
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -239,7 +233,7 @@ def optimize_model(df: pd.DataFrame, encoders: dict):
     if n_races < 100:
         raise ValueError(f"レース数が少なすぎます: {n_races}")
 
-    print(f"  Optuna用データ: 全 {n_races} レース（検証分割なし）")
+    print(f"  Optuna用データ: 全 {n_races} レース")
     train_set, x_train = build_rank_dataset(df, encoders)
 
     print(f"  Optuna 最適化開始（{N_TRIALS} trials）...")
@@ -334,7 +328,7 @@ def evaluate_trifecta(model, df, encoders, label, output_path: Path):
     print(f"  1着艇番 的中率: {first_hits / n_races:.2%}")
     print(f"  2連単 的中率:   {second_hits / n_races:.2%}")
     print(f"  3連単 的中率:   {hits[1] / n_races:.2%}")
-    print(f"  真の3連単 平均-log確率: {logloss_sum / n_races:.4f}")
+    print(f"  平均-log確率: {logloss_sum / n_races:.4f}")
 
     pd.DataFrame([metrics]).to_csv(output_path, index=False, encoding="UTF-8-sig")
     print(f"  評価結果CSV: {output_path}")
@@ -367,14 +361,14 @@ def run_shap_analysis(model, x_sample):
 
     plt.figure(figsize=(10, 6))
     shap.summary_plot(shap_values, x_sample, plot_type="bar", show=False)
-    plt.title("特徴量（1着1号艇以外予想）", fontsize=14)
+    plt.title("特徴量", fontsize=14)
     plt.tight_layout()
     plt.savefig(SHAP_IMPORTANCE_PNG_PATH, dpi=150, bbox_inches="tight")
     plt.close()
 
     plt.figure(figsize=(10, 8))
     shap.summary_plot(shap_values, x_sample, show=False)
-    plt.title("特徴量（1着1号艇以外予想）", fontsize=14)
+    plt.title("特徴量", fontsize=14)
     plt.tight_layout()
     plt.savefig(SHAP_BEESWARM_PNG_PATH, dpi=150, bbox_inches="tight")
     plt.close()
@@ -407,7 +401,7 @@ def main():
     model, summary, x_train, encoders = optimize_model(df, encoders)
 
     evaluate_trifecta(
-        model, df, encoders, "1着1号艇以外予想（学習データ）", EVALUATION_CSV_PATH
+        model, df, encoders, "1着1号艇以外予想", EVALUATION_CSV_PATH
     )
 
     model.save_model(str(MODEL_PATH))
@@ -417,7 +411,7 @@ def main():
 
     save_predictions(model, df, encoders, PREDICTIONS_CSV_PATH)
 
-    print("\nSHAP分析中...")
+    print("\nSHAP分析")
     x_sample = x_train.sample(min(SHAP_SAMPLE_SIZE, len(x_train)), random_state=42)
     run_shap_analysis(model, x_sample)
 
