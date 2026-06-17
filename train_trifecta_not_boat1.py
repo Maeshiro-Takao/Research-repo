@@ -15,9 +15,17 @@ import optuna
 import pandas as pd
 import shap
 
+from trifecta_training_utils import (
+    RECENCY_HALF_LIFE_YEARS,
+    ROLLING_FEATURE_EXCLUDE,
+    VALIDATION_YEARS,
+    compute_recency_weights,
+    temporal_train_valid_split,
+    train_incremental_by_year,
+)
+
 BASE_DIR = Path(__file__).resolve().parent
 RACE_DATA_PATH = BASE_DIR / "レースデータ" / "丸亀学習用_レースデータ.csv"
-PLAYER_DATA_PATH = BASE_DIR / "レースデータ" / "丸亀学習用_選手データ.csv"
 OUTPUT_DIR = BASE_DIR / "models" / "1着1号艇以外予想"
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -33,11 +41,12 @@ SHAP_IMPORTANCE_CSV_PATH = OUTPUT_DIR / "特徴量重要度.csv"
 RACE_KEY = ["開催日", "日目", "レース"]
 RACE_ROW_KEY = ["開催日", "日目", "レース", "艇"]
 
-RACE_EXCLUDE_COLUMNS = {"レース", "着", "選手名", "日目", "開催日", "登番", "モーター", "ボート", "艇"}
-PLAYER_META_COLS = ["名前漢字", "算出期間自", "算出期間至"]
+RACE_EXCLUDE_COLUMNS = {"レース", "着", "選手名", "日目", "開催日", "登番", "モーター", "ボート", "艇", "3連単オッズ"}
+PLAYER_META_COLS = ["算出期間自", "算出期間至"]
 RACE_BASE_FEATURES = [
     "展示",
     "展示順位", "展示差", "風速", "波高", "天気", "風向",
+    "当地勝率",
 ]
 TOP_N_LIST = [1, 3, 5, 10, 30]
 SHAP_SAMPLE_SIZE = 2000
@@ -69,15 +78,18 @@ JAPANESE_FONT_CANDIDATES = [
 ]
 
 
-def configure_features(player_df: pd.DataFrame) -> None:
+def configure_features(df: pd.DataFrame) -> None:
     global FEATURES
-    player_features = [
-        c for c in player_df.columns
-        if c not in PLAYER_META_COLS
-        and c != "登番"
-        and c not in RACE_EXCLUDE_COLUMNS
-    ]
-    FEATURES = RACE_BASE_FEATURES + player_features
+    base = [c for c in RACE_BASE_FEATURES if c in df.columns]
+    exclude = (
+        RACE_EXCLUDE_COLUMNS
+        | set(PLAYER_META_COLS)
+        | set(RACE_BASE_FEATURES)
+        | ROLLING_FEATURE_EXCLUDE
+        | {"登番"}
+    )
+    player_features = [c for c in df.columns if c not in exclude]
+    FEATURES = list(dict.fromkeys(base + player_features))
 
 
 def setup_japanese_font() -> str | None:
@@ -96,40 +108,10 @@ def setup_japanese_font() -> str | None:
     return None
 
 
-def merge_player_data(race_df: pd.DataFrame, player_df: pd.DataFrame) -> pd.DataFrame:
-    race = race_df.copy()
-    player = player_df.copy()
-    race["開催日"] = pd.to_datetime(race["開催日"])
-
-    if {"算出期間自", "算出期間至"}.issubset(player.columns):
-        player["算出期間自"] = pd.to_datetime(player["算出期間自"])
-        player["算出期間至"] = pd.to_datetime(player["算出期間至"])
-        player_cols = [c for c in player.columns if c != "登番"]
-        merged = race.merge(player, on="登番", how="left")
-        period_match = (
-            merged["算出期間自"].notna()
-            & (merged["開催日"] >= merged["算出期間自"])
-            & (merged["開催日"] <= merged["算出期間至"])
-        )
-        matched = (
-            merged.loc[period_match, RACE_ROW_KEY + player_cols]
-            .drop_duplicates(RACE_ROW_KEY)
-        )
-        out = race.merge(matched, on=RACE_ROW_KEY, how="left")
-    else:
-        player = player.drop_duplicates(subset=["登番"], keep="last")
-        player_cols = [c for c in player.columns if c != "登番"]
-        out = race.merge(player, on="登番", how="left")
-
-    return out.drop(columns=[c for c in PLAYER_META_COLS if c in out.columns])
-
-
 def load_data() -> pd.DataFrame:
-    print(f"データ読み込み: {RACE_DATA_PATH.name}, {PLAYER_DATA_PATH.name}")
-    race_df = pd.read_csv(RACE_DATA_PATH)
-    player_df = pd.read_csv(PLAYER_DATA_PATH)
-    configure_features(player_df)
-    df = merge_player_data(race_df, player_df)
+    print(f"データ読み込み: {RACE_DATA_PATH.name}")
+    df = pd.read_csv(RACE_DATA_PATH)
+    configure_features(df)
     df = filter_target_races(df)
 
     matched = df["級"].notna().sum() if "級" in df.columns else 0
@@ -156,9 +138,6 @@ def filter_target_races(df: pd.DataFrame) -> pd.DataFrame:
     return pd.concat(parts, ignore_index=True) if parts else df.iloc[0:0]
 
 
-    return pd.concat(parts, ignore_index=True) if parts else df.iloc[0:0]
-
-
 def prepare(df: pd.DataFrame, encoders=None):
     df = filter_complete_races(df)
     df = df.sort_values(RACE_KEY).reset_index(drop=True)
@@ -174,14 +153,15 @@ def prepare(df: pd.DataFrame, encoders=None):
         df[col] = df[col].astype(str).map(encoders[col]).fillna(-1).astype(int)
     x = df[FEATURES]
     y = 7 - df["着"].astype(int)
-    return x, y, groups, encoders, boat_numbers
+    weights = compute_recency_weights(df["開催日"])
+    return x, y, groups, encoders, boat_numbers, weights
 
 
 def build_rank_dataset(df: pd.DataFrame, encoders: dict):
-    x, y, groups, _, _ = prepare(df, encoders)
+    x, y, groups, _, _, weights = prepare(df, encoders)
     cat = [c for c in CATEGORICAL if c in FEATURES]
     train_set = lgb.Dataset(
-        x, label=y, group=groups,
+        x, label=y, weight=weights, group=groups,
         categorical_feature=cat, free_raw_data=False,
     )
     return train_set, x
@@ -203,15 +183,15 @@ def suggest_lgbm_params(trial: optuna.Trial) -> tuple[dict, int]:
     return params, trial.suggest_int("num_boost_round", 100, 500)
 
 
-def create_objective(train_set: lgb.Dataset):
+def create_objective(train_set: lgb.Dataset, valid_set: lgb.Dataset):
     def objective(trial: optuna.Trial) -> float:
         params, num_boost_round = suggest_lgbm_params(trial)
         model = lgb.train(
             params, train_set, num_boost_round=num_boost_round,
-            valid_sets=[train_set], valid_names=["train"],
-            callbacks=[lgb.log_evaluation(0)],
+            valid_sets=[valid_set], valid_names=["valid"],
+            callbacks=[lgb.log_evaluation(0), lgb.early_stopping(30, verbose=False)],
         )
-        return model.best_score["train"]["ndcg@1"]
+        return model.best_score["valid"]["ndcg@1"]
     return objective
 
 
@@ -228,32 +208,49 @@ def train_with_params(train_set, best_params: dict) -> lgb.Booster:
     )
 
 
-def optimize_model(df: pd.DataFrame, encoders: dict):
-    n_races = len(df) // 6
-    if n_races < 100:
-        raise ValueError(f"レース数が少なすぎます: {n_races}")
+def optimize_model(df: pd.DataFrame, encoders: dict | None):
+    train_df, valid_df = temporal_train_valid_split(df)
+    n_train = len(train_df) // 6
+    n_valid = len(valid_df) // 6
+    if n_train < 100:
+        raise ValueError(f"学習レース数が少なすぎます: {n_train}")
+    if n_valid < 20:
+        raise ValueError(f"検証レース数が少なすぎます: {n_valid}")
 
-    print(f"  Optuna用データ: 全 {n_races} レース")
-    train_set, x_train = build_rank_dataset(df, encoders)
+    print(f"  時系列分割: 学習 {n_train} レース / 検証 {n_valid} レース（直近{VALIDATION_YEARS}年）")
+    print(f"  重み付け: 半減期 {RECENCY_HALF_LIFE_YEARS} 年（新しいデータほど重視）")
+    print(f"  除外特徴量: 直近10年/5年の勝率・連帯率")
 
-    print(f"  Optuna 最適化開始（{N_TRIALS} trials）...")
+    _, _, _, encoders, _, _ = prepare(train_df, encoders or {})
+    train_set, _ = build_rank_dataset(train_df, encoders)
+    valid_set, _ = build_rank_dataset(valid_df, encoders)
+
+    print(f"  Optuna 最適化開始（{N_TRIALS} trials, 検証 ndcg@1）...")
     study = optuna.create_study(direction="maximize")
-    study.optimize(create_objective(train_set), n_trials=N_TRIALS)
+    study.optimize(create_objective(train_set, valid_set), n_trials=N_TRIALS)
     print(f"  Best trial: {study.best_trial.number}")
-    print(f"  Best train ndcg@1: {study.best_value:.6f}")
+    print(f"  Best valid ndcg@1: {study.best_value:.6f}")
 
-    model = train_with_params(train_set, study.best_params)
+    model, encoders, x_train, train_meta = train_incremental_by_year(
+        df, study.best_params, BASE_LGBM_PARAMS, prepare, build_rank_dataset,
+    )
 
     summary = {
         "model": "1着1号艇以外予想",
-        "n_races": n_races,
+        "n_races": len(df) // 6,
+        "n_train_races": n_train,
+        "n_valid_races": n_valid,
         "best_value": study.best_value,
-        "best_metric": "train ndcg@1",
+        "best_metric": "valid ndcg@1",
+        "recency_half_life_years": RECENCY_HALF_LIFE_YEARS,
+        "validation_years": VALIDATION_YEARS,
+        "excluded_features": sorted(ROLLING_FEATURE_EXCLUDE),
         "best_params": study.best_params,
         "n_trials": N_TRIALS,
         "features": FEATURES,
+        **train_meta,
     }
-    return model, summary, x_train, encoders
+    return model, summary, x_train, encoders, valid_df
 
 
 def get_actual_trifecta(race_df: pd.DataFrame) -> tuple[int, int, int]:
@@ -280,7 +277,7 @@ def calc_trifecta_probs_from_scores(scores: np.ndarray) -> dict[tuple[int, int, 
 
 
 def predict_race_trifecta(model, race_df, encoders):
-    x, _, _, _, boat_numbers = prepare(race_df, encoders)
+    x, _, _, _, boat_numbers, _ = prepare(race_df, encoders)
     scores = model.predict(x)
     score_arr = np.zeros(6)
     for idx, boat in enumerate(boat_numbers):
@@ -397,11 +394,15 @@ def main():
         f"{pd.to_datetime(df['開催日']).max().date()}"
     )
 
-    _, _, _, encoders, _ = prepare(df)
-    model, summary, x_train, encoders = optimize_model(df, encoders)
+    _, _, _, encoders, _, _ = prepare(df)
+    model, summary, x_train, encoders, valid_df = optimize_model(df, encoders)
 
     evaluate_trifecta(
-        model, df, encoders, "1着1号艇以外予想", EVALUATION_CSV_PATH
+        model, df, encoders, "学習データ全体", EVALUATION_CSV_PATH
+    )
+    holdout_path = OUTPUT_DIR / "検証_評価結果.csv"
+    evaluate_trifecta(
+        model, valid_df, encoders, f"直近{VALIDATION_YEARS}年ホールドアウト", holdout_path
     )
 
     model.save_model(str(MODEL_PATH))

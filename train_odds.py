@@ -25,7 +25,6 @@ from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 BASE_DIR = Path(__file__).resolve().parent
 ODDS_PATH = BASE_DIR / "オッズデータ" / "丸亀学習用_3連単オッズ.csv"
 RACE_PATH = BASE_DIR / "レースデータ" / "丸亀学習用_レースデータ.csv"
-PLAYER_PATH = BASE_DIR / "レースデータ" / "丸亀学習用_選手データ.csv"
 OUTPUT_ROOT = BASE_DIR / "models" / "3連単オッズ予想"
 
 MODEL_CONFIGS = [
@@ -45,9 +44,10 @@ MODEL_CONFIGS = [
 
 RACE_KEY = ["開催日", "日目", "レース"]
 RACE_ROW_KEY = ["開催日", "日目", "レース", "艇"]
-PLAYER_META_COLS = ["名前漢字", "算出期間自", "算出期間至"]
+PLAYER_META_COLS = ["算出期間自", "算出期間至"]
 RACE_EXCLUDE_COLUMNS = {"レース", "着", "選手名", "日目", "開催日", "登番", "モーター", "ボート", "艇"}
-RACE_BASE_FEATURES = ["展示", "展示順位", "展示差", "風速", "波高", "天気", "風向"]
+RACE_BASE_FEATURES = ["展示", "展示順位", "展示差", "風速", "波高", "天気", "風向",
+                      "3連単オッズ", "当地勝率"]
 CATEGORICAL = ["天気", "風向", "級"]
 N_TRIALS = 50
 VALID_RATIO = 0.15
@@ -64,44 +64,17 @@ BASE_LGBM_PARAMS = {
 }
 
 
-def configure_features(player_df: pd.DataFrame) -> None:
+def configure_features(df: pd.DataFrame) -> None:
     global FEATURES
+    extra_exclude = {"3連単オッズ", "当地勝率"}
     player_features = [
-        c
-        for c in player_df.columns
+        c for c in df.columns
         if c not in PLAYER_META_COLS
         and c != "登番"
         and c not in RACE_EXCLUDE_COLUMNS
+        and c not in extra_exclude
     ]
     FEATURES = RACE_BASE_FEATURES + player_features
-
-
-def merge_player_data(race_df: pd.DataFrame, player_df: pd.DataFrame) -> pd.DataFrame:
-    race = race_df.copy()
-    player = player_df.copy()
-    race["開催日"] = pd.to_datetime(race["開催日"])
-
-    if {"算出期間自", "算出期間至"}.issubset(player.columns):
-        player["算出期間自"] = pd.to_datetime(player["算出期間自"])
-        player["算出期間至"] = pd.to_datetime(player["算出期間至"])
-        player_cols = [c for c in player.columns if c != "登番"]
-        merged = race.merge(player, on="登番", how="left")
-        period_match = (
-            merged["算出期間自"].notna()
-            & (merged["開催日"] >= merged["算出期間自"])
-            & (merged["開催日"] <= merged["算出期間至"])
-        )
-        matched = (
-            merged.loc[period_match, RACE_ROW_KEY + player_cols]
-            .drop_duplicates(RACE_ROW_KEY)
-        )
-        out = race.merge(matched, on=RACE_ROW_KEY, how="left")
-    else:
-        player = player.drop_duplicates(subset=["登番"], keep="last")
-        player_cols = [c for c in player.columns if c != "登番"]
-        out = race.merge(player, on="登番", how="left")
-
-    return out.drop(columns=[c for c in PLAYER_META_COLS if c in out.columns])
 
 
 def filter_complete_races(df: pd.DataFrame) -> pd.DataFrame:
@@ -120,10 +93,8 @@ def load_odds() -> pd.DataFrame:
 
 
 def load_race_player_data() -> pd.DataFrame:
-    race_df = pd.read_csv(RACE_PATH)
-    player_df = pd.read_csv(PLAYER_PATH)
-    configure_features(player_df)
-    df = merge_player_data(race_df, player_df)
+    df = pd.read_csv(RACE_PATH)
+    configure_features(df)
     df = filter_complete_races(df)
     df["開催日"] = pd.to_datetime(df["開催日"]).dt.strftime("%Y-%m-%d")
     return df

@@ -9,7 +9,6 @@ import pandas as pd
 
 BASE_DIR = Path(__file__).resolve().parent
 RACE_DATA_PATH = BASE_DIR / "レースデータ" / "丸亀テスト用_レースデータ.csv"
-PLAYER_DATA_PATH = BASE_DIR / "レースデータ" / "丸亀テスト用_選手データ.csv"
 OUTPUT_DIR = BASE_DIR / "models" / "1着1号艇以外予想"
 
 MODEL_PATH = OUTPUT_DIR / "lgbm_trifecta_not_boat1_model.txt"
@@ -19,37 +18,9 @@ EVALUATION_CSV_PATH = OUTPUT_DIR / "テスト_評価結果.csv"
 
 RACE_KEY = ["開催日", "日目", "レース"]
 RACE_ROW_KEY = ["開催日", "日目", "レース", "艇"]
-PLAYER_META_COLS = ["名前漢字", "算出期間自", "算出期間至"]
+PLAYER_META_COLS = ["算出期間自", "算出期間至"]
 CATEGORICAL = ["天気", "風向", "級"]
 TOP_N_LIST = [1, 3, 5, 10, 30]
-
-
-def merge_player_data(race_df: pd.DataFrame, player_df: pd.DataFrame) -> pd.DataFrame:
-    race = race_df.copy()
-    player = player_df.copy()
-    race["開催日"] = pd.to_datetime(race["開催日"])
-
-    if {"算出期間自", "算出期間至"}.issubset(player.columns):
-        player["算出期間自"] = pd.to_datetime(player["算出期間自"])
-        player["算出期間至"] = pd.to_datetime(player["算出期間至"])
-        player_cols = [c for c in player.columns if c != "登番"]
-        merged = race.merge(player, on="登番", how="left")
-        period_match = (
-            merged["算出期間自"].notna()
-            & (merged["開催日"] >= merged["算出期間自"])
-            & (merged["開催日"] <= merged["算出期間至"])
-        )
-        matched = (
-            merged.loc[period_match, RACE_ROW_KEY + player_cols]
-            .drop_duplicates(RACE_ROW_KEY)
-        )
-        out = race.merge(matched, on=RACE_ROW_KEY, how="left")
-    else:
-        player = player.drop_duplicates(subset=["登番"], keep="last")
-        player_cols = [c for c in player.columns if c != "登番"]
-        out = race.merge(player, on="登番", how="left")
-
-    return out.drop(columns=[c for c in PLAYER_META_COLS if c in out.columns])
 
 
 def filter_complete_races(df: pd.DataFrame) -> pd.DataFrame:
@@ -58,10 +29,9 @@ def filter_complete_races(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def load_test_data() -> pd.DataFrame:
-    print(f"データ読み込み: {RACE_DATA_PATH.name}, {PLAYER_DATA_PATH.name}")
-    race_df = pd.read_csv(RACE_DATA_PATH, low_memory=False)
-    player_df = pd.read_csv(PLAYER_DATA_PATH, low_memory=False)
-    df = filter_complete_races(merge_player_data(race_df, player_df))
+    print(f"データ読み込み: {RACE_DATA_PATH.name}")
+    df = pd.read_csv(RACE_DATA_PATH, low_memory=False)
+    df = filter_complete_races(df)
     matched = df["級"].notna().sum() if "級" in df.columns else 0
     print(f"  全体: {len(df)} 行 / {len(df) // 6} レース")
     print(f"  選手データ結合: {matched} 行 ({matched / len(df):.1%})")

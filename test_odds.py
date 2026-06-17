@@ -23,14 +23,12 @@ from train_odds import (
     build_odds_dataset,
     filter_complete_races,
     fit_encoders,
-    merge_player_data,
     configure_features,
 )
 
 BASE_DIR = Path(__file__).resolve().parent
 ODDS_PATH = BASE_DIR / "オッズデータ" / "丸亀テスト用_3連単オッズ.csv"
 RACE_PATH = BASE_DIR / "レースデータ" / "丸亀テスト用_レースデータ.csv"
-PLAYER_PATH = BASE_DIR / "レースデータ" / "丸亀テスト用_選手データ.csv"
 OUTPUT_ROOT = BASE_DIR / "models" / "3連単オッズ予想"
 
 
@@ -45,10 +43,8 @@ def load_test_odds() -> pd.DataFrame:
 
 
 def load_test_race_player_data() -> pd.DataFrame:
-    race_df = pd.read_csv(RACE_PATH)
-    player_df = pd.read_csv(PLAYER_PATH)
-    configure_features(player_df)
-    df = merge_player_data(race_df, player_df)
+    df = pd.read_csv(RACE_PATH)
+    configure_features(df)
     df = filter_complete_races(df)
     df["開催日"] = pd.to_datetime(df["開催日"]).dt.strftime("%Y-%m-%d")
     return df
