@@ -1,14 +1,11 @@
 """
-元データからの抽出を行う。
+元データフォルダ内の txt からレース・選手データを抽出する。
 
-- グレード: 丸亀グレード別レース2014_2025.csv
-- レース: 競走成績TXT（着・展示・気象・3連単オッズ）
-- 選手: fan*.txt（登番・級・全国勝率など）
-
-計算は CalcRD.py、統合出力は ComRD.py。
+- 計算処理は行わない（CalcRD.py へ委譲）
+- 統合出力は行わない（ComRD.py へ委譲）
 
 使い方:
-    python レースデータ抽出コード/ExtRD.py   # グレードCSV生成
+    python レースデータ抽出コード/ExtRD.py   # グレードCSV生成（初回・更新時）
 """
 from __future__ import annotations
 
@@ -21,14 +18,41 @@ import pandas as pd
 BASE_DIR = Path(__file__).resolve().parent.parent
 GRADE_SOURCE_DIR = BASE_DIR / "元データ" / "丸亀グレード別レース名2014_2025"
 RACE_INPUT_DIR = BASE_DIR / "元データ" / "競走成績"
-OUTPUT_PATH = BASE_DIR / "元データ" / "丸亀グレード別レース2014_2025.csv"
+PLAYER_INPUT_DIR = BASE_DIR / "元データ" / "選手データ"
+GRADE_OUTPUT_PATH = BASE_DIR / "元データ" / "丸亀グレード別レース2014_2025.csv"
 MARUGAME_CODE = "15"
 
-OUTPUT_COLUMNS = ["開催日", "日目", "レース", "グレード", "レース名", "優勝戦"]
 RACE_KEY = ["開催日", "日目", "レース"]
+RACE_ROW_KEY = ["開催日", "日目", "レース", "艇"]
+
+GRADE_COLUMNS = ["開催日", "日目", "レース", "グレード", "レース名", "優勝戦"]
+
+PLAYER_EXTRACT_COLS = [
+    "級", "身長", "体重", "勝率", "複勝率",
+    "優出回数", "優勝回数", "平均スタートタイミング",
+]
+for _course in range(1, 7):
+    PLAYER_EXTRACT_COLS += [
+        f"{_course}コース進入回数",
+        f"{_course}コース複勝率",
+        f"{_course}コース平均スタートタイミング",
+        f"{_course}コース平均スタート順位",
+    ]
+PLAYER_EXTRACT_COLS += ["算出期間自", "算出期間至"]
+
+EXTRACT_COLUMNS = [
+    "開催日", "日目", "レース",
+    "着", "艇",
+    "登番", "選手名", "モーター", "ボート", "展示",
+    "天気", "風向", "風速", "波高",
+    "3連単オッズ",
+] + PLAYER_EXTRACT_COLS
 
 RACE_HEADER = re.compile(r"^(\d+)R\s+.+H\d+m")
 BLOCK_DATE = re.compile(r"第\s*(\d+)日\s+(\d{4})/\s*(\d+)/\s*(\d+)")
+
+
+# --- グレードCSV（当地勝率計算用メタデータ） ---
 
 
 def normalize_race_name(name: str) -> str:
@@ -37,7 +61,6 @@ def normalize_race_name(name: str) -> str:
 
 
 def load_meeting_grade_lookup() -> dict[str, str]:
-    """丸亀グレード別レース名 CSV からレース名→グレードの辞書を構築"""
     lookup: dict[str, str] = {}
     for csv_path in sorted(GRADE_SOURCE_DIR.glob("*/*_ALL.csv")):
         df = pd.read_csv(csv_path)
@@ -145,7 +168,6 @@ def extract_grade_rows_from_block(
 
 
 def build_grade_race_table(years: range | None = None) -> pd.DataFrame:
-    """競走成績からグレード・優勝戦付きレース表を構築"""
     if years is None:
         years = range(14, 26)
 
@@ -185,16 +207,16 @@ def build_grade_race_table(years: range | None = None) -> pd.DataFrame:
                     block_lines.append(s)
 
     if not records:
-        return pd.DataFrame(columns=OUTPUT_COLUMNS)
+        return pd.DataFrame(columns=GRADE_COLUMNS)
 
     df = pd.DataFrame(records)
     df = df.drop_duplicates(subset=RACE_KEY, keep="last")
     df = df.sort_values(RACE_KEY).reset_index(drop=True)
-    return df[OUTPUT_COLUMNS]
+    return df[GRADE_COLUMNS]
 
 
 def load_grade_race_table(path: Path | None = None) -> pd.DataFrame:
-    csv_path = path or OUTPUT_PATH
+    csv_path = path or GRADE_OUTPUT_PATH
     if not csv_path.exists():
         raise FileNotFoundError(
             f"グレードCSVが見つかりません: {csv_path}\n"
@@ -215,33 +237,13 @@ def _to_bool(value) -> bool:
 
 
 def save_grade_csv(df: pd.DataFrame, path: Path | None = None) -> Path:
-    output_path = path or OUTPUT_PATH
+    output_path = path or GRADE_OUTPUT_PATH
     output_path.parent.mkdir(parents=True, exist_ok=True)
     df.to_csv(output_path, index=False, encoding="UTF-8-sig")
     return output_path
 
 
-def attach_grade_info(
-    race_df: pd.DataFrame,
-    grade_df: pd.DataFrame,
-) -> pd.DataFrame:
-    """丸亀グレード別レースCSVからグレード・優勝戦をレース行へ付与"""
-    grade_cols = grade_df.rename(
-        columns={"グレード": "grade", "優勝戦": "is_championship"}
-    )
-    merged = race_df.merge(
-        grade_cols[["開催日", "日目", "レース", "grade", "is_championship"]],
-        on=["開催日", "日目", "レース"],
-        how="left",
-    )
-    merged["grade"] = merged["grade"].fillna("一般")
-    merged["is_championship"] = merged["is_championship"].fillna(False).astype(bool)
-    return merged
-
-
 # --- 選手データ抽出 (fan*.txt) ---
-
-PLAYER_INPUT_DIR = BASE_DIR / "元データ" / "選手データ"
 
 EXCLUDED_RESULT_CODES = ("F", "L0", "L1", "K0", "K1", "S0", "S1", "S2")
 SKIP_FIELDS = {
@@ -436,8 +438,53 @@ def extract_player_records(years: range) -> list[dict]:
     return dedupe_player_records(records)
 
 
-def extract_player_dataframe(years: range) -> pd.DataFrame:
-    return pd.DataFrame(extract_player_records(years))
+def pick_player_period_row(group: pd.DataFrame, race_date) -> pd.Series | None:
+    """開催日に対応する選手統計行を返す（未一致時は直前の期を使用）"""
+    exact = group[
+        (group["算出期間自"] <= race_date) & (race_date <= group["算出期間至"])
+    ]
+    if len(exact) > 0:
+        return exact.iloc[-1]
+
+    prior = group[group["算出期間至"] <= race_date]
+    if len(prior) == 0:
+        return None
+    return prior.iloc[-1]
+
+
+def attach_player_fields(race_df: pd.DataFrame, player_df: pd.DataFrame) -> pd.DataFrame:
+    """抽出済み選手統計をレース行へ付与（期間一致）"""
+    player_cols = [c for c in PLAYER_EXTRACT_COLS if c in player_df.columns]
+    player_groups = {
+        int(toban): group.sort_values("算出期間自").reset_index(drop=True)
+        for toban, group in player_df.groupby("登番")
+    }
+
+    matched_cols = {col: [] for col in player_cols}
+    race = race_df.copy()
+    race["開催日"] = pd.to_datetime(race["開催日"])
+
+    for row in race.itertuples(index=False):
+        toban = int(row.登番)
+        group = player_groups.get(toban)
+        if group is None or len(group) == 0:
+            for col in player_cols:
+                matched_cols[col].append(pd.NA)
+            continue
+
+        pick = pick_player_period_row(group, row.開催日)
+        if pick is None:
+            for col in player_cols:
+                matched_cols[col].append(pd.NA)
+            continue
+
+        for col in player_cols:
+            matched_cols[col].append(pick[col])
+
+    out = race_df.copy()
+    for col in player_cols:
+        out[col] = matched_cols[col]
+    return out
 
 
 # --- レース結果抽出 (競走成績TXT) ---
@@ -686,6 +733,45 @@ def extract_race_records(years: range) -> list[dict]:
 
 def extract_race_dataframe(years: range) -> pd.DataFrame:
     return pd.DataFrame(extract_race_records(years))
+
+
+def extract(
+    years: range,
+    player_years: range | None = None,
+) -> tuple[pd.DataFrame, list[dict]]:
+    """
+    txt から抽出可能な項目のみを DataFrame 化する。
+
+    Returns:
+        (抽出DataFrame, 選手生データ) — 生データは CalcRD への計算入力用
+    """
+    if player_years is None:
+        player_years = range(years.start, years.stop + 1)
+
+    race_df = extract_race_dataframe(years)
+    player_records = extract_player_records(player_years)
+
+    if len(race_df) == 0:
+        return pd.DataFrame(columns=EXTRACT_COLUMNS), player_records
+
+    player_df = pd.DataFrame(player_records)
+    if len(player_df) > 0:
+        player_df["算出期間自"] = pd.to_datetime(player_df["算出期間自"])
+        player_df["算出期間至"] = pd.to_datetime(player_df["算出期間至"])
+        merged = attach_player_fields(race_df, player_df)
+    else:
+        merged = race_df.copy()
+
+    for col in EXTRACT_COLUMNS:
+        if col not in merged.columns:
+            merged[col] = pd.NA
+
+    merged = merged[EXTRACT_COLUMNS]
+    if "算出期間自" in merged.columns:
+        merged["算出期間自"] = pd.to_datetime(merged["算出期間自"]).dt.strftime("%Y-%m-%d")
+        merged["算出期間至"] = pd.to_datetime(merged["算出期間至"]).dt.strftime("%Y-%m-%d")
+
+    return merged, player_records
 
 
 def main():

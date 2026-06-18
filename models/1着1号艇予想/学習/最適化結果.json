@@ -1,33 +1,25 @@
 {
   "model": "1着1号艇予想",
+  "target_races": "1着=1号艇",
+  "ranking_boats": "2〜6号艇（5艇）",
   "n_races": 12848,
   "n_train_races": 11557,
   "n_valid_races": 1291,
-  "best_value": 0.6527729287867017,
+  "best_value": 0.6687050977076837,
   "best_metric": "valid ndcg@1",
   "recency_half_life_years": 1.0,
   "validation_years": 1,
-  "excluded_features": [
-    "直近10年2連帯率",
-    "直近10年3連帯率",
-    "直近10年勝率",
-    "直近10年当地勝率",
-    "直近5年2連帯率",
-    "直近5年3連帯率",
-    "直近5年勝率",
-    "直近5年当地勝率"
-  ],
   "best_params": {
-    "num_leaves": 78,
+    "num_leaves": 107,
     "max_depth": 4,
-    "learning_rate": 0.1489376870149756,
-    "min_data_in_leaf": 138,
-    "feature_fraction": 0.9376927016954946,
-    "bagging_fraction": 0.7699267869747377,
-    "bagging_freq": 7,
-    "lambda_l1": 0.013482181920507496,
-    "lambda_l2": 0.0015711986120359334,
-    "num_boost_round": 499
+    "learning_rate": 0.11375499347542127,
+    "min_data_in_leaf": 74,
+    "feature_fraction": 0.8808279383715716,
+    "bagging_fraction": 0.8722290651708876,
+    "bagging_freq": 1,
+    "lambda_l1": 0.10804963602360038,
+    "lambda_l2": 0.0055466487057364774,
+    "num_boost_round": 272
   },
   "n_trials": 50,
   "features": [
@@ -42,9 +34,6 @@
     "体重",
     "勝率",
     "複勝率",
-    "1着率",
-    "2着率",
-    "3着率",
     "優出回数",
     "優勝回数",
     "平均スタートタイミング",
@@ -71,9 +60,13 @@
     "6コース進入回数",
     "6コース複勝率",
     "6コース平均スタートタイミング",
-    "6コース平均スタート順位"
+    "6コース平均スタート順位",
+    "1着率",
+    "2着率",
+    "3着率"
   ],
   "training_mode": "yearly_incremental",
+  "algorithm": "LightGBM Ranker (lambdarank)",
   "years": [
     2014,
     2015,
@@ -87,7 +80,7 @@
     2023,
     2024
   ],
-  "rounds_per_year": 45,
+  "rounds_per_year": 30,
   "yearly_log": [
     {
       "year": 2014,

@@ -1,0 +1,130 @@
+{
+  "model": "1着1号艇以外予想",
+  "target_races": "1着≠1号艇",
+  "ranking_boats": "全6艇",
+  "n_races": 11327,
+  "n_train_races": 10315,
+  "n_valid_races": 1012,
+  "best_value": 0.6423750060951064,
+  "best_metric": "valid ndcg@1",
+  "recency_half_life_years": 1.0,
+  "validation_years": 1,
+  "best_params": {
+    "num_leaves": 44,
+    "max_depth": 4,
+    "learning_rate": 0.19637191607008556,
+    "min_data_in_leaf": 78,
+    "feature_fraction": 0.6488421732200269,
+    "bagging_fraction": 0.7937404037805361,
+    "bagging_freq": 2,
+    "lambda_l1": 2.2612120289726527,
+    "lambda_l2": 0.21058887983207072,
+    "num_boost_round": 127
+  },
+  "n_trials": 50,
+  "features": [
+    "展示",
+    "風速",
+    "波高",
+    "天気",
+    "風向",
+    "当地勝率",
+    "級",
+    "身長",
+    "体重",
+    "勝率",
+    "複勝率",
+    "優出回数",
+    "優勝回数",
+    "平均スタートタイミング",
+    "1コース進入回数",
+    "1コース複勝率",
+    "1コース平均スタートタイミング",
+    "1コース平均スタート順位",
+    "2コース進入回数",
+    "2コース複勝率",
+    "2コース平均スタートタイミング",
+    "2コース平均スタート順位",
+    "3コース進入回数",
+    "3コース複勝率",
+    "3コース平均スタートタイミング",
+    "3コース平均スタート順位",
+    "4コース進入回数",
+    "4コース複勝率",
+    "4コース平均スタートタイミング",
+    "4コース平均スタート順位",
+    "5コース進入回数",
+    "5コース複勝率",
+    "5コース平均スタートタイミング",
+    "5コース平均スタート順位",
+    "6コース進入回数",
+    "6コース複勝率",
+    "6コース平均スタートタイミング",
+    "6コース平均スタート順位",
+    "1着率",
+    "2着率",
+    "3着率"
+  ],
+  "training_mode": "yearly_incremental",
+  "algorithm": "LightGBM Ranker (lambdarank)",
+  "years": [
+    2014,
+    2015,
+    2016,
+    2017,
+    2018,
+    2019,
+    2020,
+    2021,
+    2022,
+    2023,
+    2024
+  ],
+  "rounds_per_year": 30,
+  "yearly_log": [
+    {
+      "year": 2014,
+      "cumulative_races": 1175
+    },
+    {
+      "year": 2015,
+      "cumulative_races": 2410
+    },
+    {
+      "year": 2016,
+      "cumulative_races": 3542
+    },
+    {
+      "year": 2017,
+      "cumulative_races": 4600
+    },
+    {
+      "year": 2018,
+      "cumulative_races": 5631
+    },
+    {
+      "year": 2019,
+      "cumulative_races": 6612
+    },
+    {
+      "year": 2020,
+      "cumulative_races": 7565
+    },
+    {
+      "year": 2021,
+      "cumulative_races": 8586
+    },
+    {
+      "year": 2022,
+      "cumulative_races": 9545
+    },
+    {
+      "year": 2023,
+      "cumulative_races": 10315
+    },
+    {
+      "year": 2024,
+      "cumulative_races": 11327
+    }
+  ]
+}

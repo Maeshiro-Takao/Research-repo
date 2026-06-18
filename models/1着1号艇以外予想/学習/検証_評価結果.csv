@@ -1,0 +1,2 @@
+﻿label,n_races,first_hit_rate,exacta_hit_rate,trifecta_top1_rate,trifecta_avg_neg_log_prob,trifecta_top3_rate,trifecta_top5_rate,trifecta_top10_rate,trifecta_top30_rate
+直近1年ホールドアウト,1012,0.44367588932806323,0.1590909090909091,0.06027667984189723,4.43157092648848,0.15612648221343872,0.21640316205533597,0.34980237154150196,0.6541501976284585
