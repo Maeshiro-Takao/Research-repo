@@ -1,8 +1,9 @@
 """
-1号艇が1着のレースを対象に、2〜6号艇のランキングから3連単（1-◯-◯）を予測する。
+1着1号艇予想モデル（LightGBM Ranker）
 
-- 学習: 1号艇を除外し、2〜6号艇のみを LambdaRank で順位付け
-- 推論: 1号艇を1着固定し、モデル出力の上位2艇を2着・3着とする
+- 対象: 実際の1着=1号艇のレースのみ
+- 学習: 1号艇を1着固定し、2〜6号艇の5艇でランキング学習
+- 目的: 1号艇1着前提で2着・3着（3連単 1-◯-◯）を予測
 """
 from __future__ import annotations
 
@@ -11,108 +12,52 @@ from pathlib import Path
 
 import joblib
 import lightgbm as lgb
-import matplotlib
-
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
-from matplotlib import font_manager
 import numpy as np
 import optuna
 import pandas as pd
-import shap
 
 from trifecta_training_utils import (
+    BASE_LGBM_RANKER_PARAMS,
+    CATEGORICAL_FEATURES,
     RECENCY_HALF_LIFE_YEARS,
-    ROLLING_FEATURE_EXCLUDE,
     VALIDATION_YEARS,
+    build_feature_list,
     compute_recency_weights,
+    run_shap_analysis,
+    setup_japanese_font,
     temporal_train_valid_split,
     train_incremental_by_year,
 )
 
 BASE_DIR = Path(__file__).resolve().parent
 RACE_DATA_PATH = BASE_DIR / "レースデータ" / "丸亀学習用_レースデータ.csv"
-OUTPUT_DIR = BASE_DIR / "models" / "1着1号艇予想"
-OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+MODEL_DIR = BASE_DIR / "models" / "1着1号艇予想"
+TRAIN_OUTPUT_DIR = MODEL_DIR / "学習"
+MODEL_DIR.mkdir(parents=True, exist_ok=True)
+TRAIN_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
-MODEL_PATH = OUTPUT_DIR / "lgbm_trifecta_boat1_model.txt"
-ENCODER_PATH = OUTPUT_DIR / "trifecta_boat1_encoders.pkl"
-OPTUNA_SUMMARY_PATH = OUTPUT_DIR / "最適化結果.json"
-PREDICTIONS_CSV_PATH = OUTPUT_DIR / "学習_予測結果.csv"
-EVALUATION_CSV_PATH = OUTPUT_DIR / "学習_評価結果.csv"
-SHAP_IMPORTANCE_PNG_PATH = OUTPUT_DIR / "特徴量重要度.png"
-SHAP_BEESWARM_PNG_PATH = OUTPUT_DIR / "特徴量影響方向.png"
-SHAP_IMPORTANCE_CSV_PATH = OUTPUT_DIR / "特徴量重要度.csv"
+MODEL_PATH = MODEL_DIR / "lgbm_trifecta_boat1_model.txt"
+ENCODER_PATH = MODEL_DIR / "trifecta_boat1_encoders.pkl"
+OPTUNA_SUMMARY_PATH = TRAIN_OUTPUT_DIR / "最適化結果.json"
+PREDICTIONS_CSV_PATH = TRAIN_OUTPUT_DIR / "予測結果.csv"
+EVALUATION_CSV_PATH = TRAIN_OUTPUT_DIR / "評価結果.csv"
+VALID_EVALUATION_CSV_PATH = TRAIN_OUTPUT_DIR / "検証_評価結果.csv"
+SHAP_BEESWARM_PNG_PATH = TRAIN_OUTPUT_DIR / "特徴量影響方向.png"
+SHAP_WATERFALL_PNG_PATH = TRAIN_OUTPUT_DIR / "特徴量ウォーターフォール.png"
 
 RACE_KEY = ["開催日", "日目", "レース"]
-RACE_ROW_KEY = ["開催日", "日目", "レース", "艇"]
-TARGET_BOAT = 1  # 1号艇を1着固定する前提
-
-RACE_EXCLUDE_COLUMNS = {"レース", "着", "選手名", "日目", "開催日", "登番", "モーター", "ボート", "艇", "3連単オッズ"}
-PLAYER_META_COLS = ["算出期間自", "算出期間至"]
-RACE_BASE_FEATURES = [
-    "展示",
-    "展示順位", "展示差", "風速", "波高", "天気", "風向",
-    "当地勝率",
-]
-TOP_N_LIST = [1, 3, 5, 10, 30]
+TARGET_BOAT = 1
+TOP_N_LIST = [1, 5, 10, 15, 20]
 SHAP_SAMPLE_SIZE = 2000
 N_TRIALS = 50
+BOATS_PER_RACE = 5
 
 FEATURES: list[str] = []
-CATEGORICAL = ["天気", "風向", "級"]
-
-BASE_LGBM_PARAMS = {
-    "objective": "lambdarank",
-    "metric": "ndcg",
-    "ndcg_eval_at": [1, 3],
-    "verbosity": -1,
-    "seed": 42,
-    "feature_pre_filter": False,
-}
-
-JAPANESE_FONT_CANDIDATES = [
-    "Hiragino Sans",
-    "Hiragino Kaku Gothic ProN",
-    "Hiragino Maru Gothic ProN",
-    "Yu Gothic",
-    "YuGothic",
-    "Meiryo",
-    "Noto Sans CJK JP",
-    "Noto Sans JP",
-    "IPAGothic",
-    "MS Gothic",
-]
 
 
 def configure_features(df: pd.DataFrame) -> None:
     global FEATURES
-    base = [c for c in RACE_BASE_FEATURES if c in df.columns]
-    exclude = (
-        RACE_EXCLUDE_COLUMNS
-        | set(PLAYER_META_COLS)
-        | set(RACE_BASE_FEATURES)
-        | ROLLING_FEATURE_EXCLUDE
-        | {"登番"}
-    )
-    player_features = [c for c in df.columns if c not in exclude]
-    FEATURES = list(dict.fromkeys(base + player_features))
-
-
-def setup_japanese_font() -> str | None:
-    available = {f.name for f in font_manager.fontManager.ttflist}
-    for name in JAPANESE_FONT_CANDIDATES:
-        if name in available:
-            plt.rcParams["font.family"] = name
-            plt.rcParams["axes.unicode_minus"] = False
-            return name
-    for font in font_manager.fontManager.ttflist:
-        if any(k in font.name for k in ("Hiragino", "Noto Sans CJK", "Yu Gothic", "Meiryo")):
-            plt.rcParams["font.family"] = font.name
-            plt.rcParams["axes.unicode_minus"] = False
-            return font.name
-    plt.rcParams["axes.unicode_minus"] = False
-    return None
+    FEATURES = build_feature_list(df)
 
 
 def load_data() -> pd.DataFrame:
@@ -146,7 +91,6 @@ def filter_target_races(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def exclude_boat1(df: pd.DataFrame) -> pd.DataFrame:
-    """1号艇を除外し、2〜6号艇のみを残す"""
     return df.loc[df["艇"].astype(int) != TARGET_BOAT].copy()
 
 
@@ -161,12 +105,12 @@ def prepare(df: pd.DataFrame, encoders=None):
     groups = df.groupby(RACE_KEY, sort=False).size().tolist()
     df = df.drop(columns=["日目", "選手名"], errors="ignore")
     encoders = encoders or {}
-    for col in CATEGORICAL:
+    for col in CATEGORICAL_FEATURES:
         if col not in encoders:
             encoders[col] = {v: i for i, v in enumerate(df[col].astype(str).unique())}
         df[col] = df[col].astype(str).map(encoders[col]).fillna(-1).astype(int)
-    x = df[FEATURES]
-    # 着順が早いほどラベルが大きい（例: 2着=5, 3着=4, ... 6着=1）
+    x = df[FEATURES].copy()
+    x.columns = FEATURES
     y = 7 - df["着"].astype(int)
     weights = compute_recency_weights(df["開催日"])
     return x, y, groups, encoders, boat_numbers, weights
@@ -174,7 +118,7 @@ def prepare(df: pd.DataFrame, encoders=None):
 
 def build_rank_dataset(df: pd.DataFrame, encoders: dict):
     x, y, groups, _, _, weights = prepare(df, encoders)
-    cat = [c for c in CATEGORICAL if c in FEATURES]
+    cat = [c for c in CATEGORICAL_FEATURES if c in FEATURES]
     train_set = lgb.Dataset(
         x, label=y, weight=weights, group=groups,
         categorical_feature=cat, free_raw_data=False,
@@ -184,7 +128,7 @@ def build_rank_dataset(df: pd.DataFrame, encoders: dict):
 
 def suggest_lgbm_params(trial: optuna.Trial) -> tuple[dict, int]:
     params = {
-        **BASE_LGBM_PARAMS,
+        **BASE_LGBM_RANKER_PARAMS,
         "num_leaves": trial.suggest_int("num_leaves", 16, 128),
         "max_depth": trial.suggest_int("max_depth", 4, 12),
         "learning_rate": trial.suggest_float("learning_rate", 0.01, 0.2, log=True),
@@ -210,31 +154,22 @@ def create_objective(train_set: lgb.Dataset, valid_set: lgb.Dataset):
     return objective
 
 
-def train_with_params(train_set, best_params: dict) -> lgb.Booster:
-    params = {**BASE_LGBM_PARAMS}
-    for key in (
-        "num_leaves", "max_depth", "learning_rate", "min_data_in_leaf",
-        "feature_fraction", "bagging_fraction", "bagging_freq", "lambda_l1", "lambda_l2",
-    ):
-        params[key] = best_params[key]
-    return lgb.train(
-        params, train_set, num_boost_round=best_params["num_boost_round"],
-        callbacks=[lgb.log_evaluation(50)],
-    )
+def count_races(df: pd.DataFrame) -> int:
+    return df.drop_duplicates(RACE_KEY).shape[0]
 
 
 def optimize_model(df: pd.DataFrame, encoders: dict | None):
     train_df, valid_df = temporal_train_valid_split(df)
-    n_train = len(train_df) // 6
-    n_valid = len(valid_df) // 6
+    n_train = count_races(train_df)
+    n_valid = count_races(valid_df)
     if n_train < 100:
         raise ValueError(f"学習レース数が少なすぎます: {n_train}")
     if n_valid < 20:
         raise ValueError(f"検証レース数が少なすぎます: {n_valid}")
 
+    print(f"  アルゴリズム: LightGBM Ranker (lambdarank)")
     print(f"  時系列分割: 学習 {n_train} レース / 検証 {n_valid} レース（直近{VALIDATION_YEARS}年）")
     print(f"  重み付け: 半減期 {RECENCY_HALF_LIFE_YEARS} 年（新しいデータほど重視）")
-    print(f"  除外特徴量: 直近10年/5年の勝率・連帯率")
 
     _, _, _, encoders, _, _ = prepare(train_df, encoders or {})
     train_set, _ = build_rank_dataset(train_df, encoders)
@@ -247,19 +182,20 @@ def optimize_model(df: pd.DataFrame, encoders: dict | None):
     print(f"  Best valid ndcg@1: {study.best_value:.6f}")
 
     model, encoders, x_train, train_meta = train_incremental_by_year(
-        df, study.best_params, BASE_LGBM_PARAMS, prepare, build_rank_dataset,
+        df, study.best_params, BASE_LGBM_RANKER_PARAMS, prepare, build_rank_dataset,
     )
 
     summary = {
         "model": "1着1号艇予想",
-        "n_races": len(df) // 6,
+        "target_races": "1着=1号艇",
+        "ranking_boats": "2〜6号艇（5艇）",
+        "n_races": count_races(df),
         "n_train_races": n_train,
         "n_valid_races": n_valid,
         "best_value": study.best_value,
         "best_metric": "valid ndcg@1",
         "recency_half_life_years": RECENCY_HALF_LIFE_YEARS,
         "validation_years": VALIDATION_YEARS,
-        "excluded_features": sorted(ROLLING_FEATURE_EXCLUDE),
         "best_params": study.best_params,
         "n_trials": N_TRIALS,
         "features": FEATURES,
@@ -276,12 +212,8 @@ def get_actual_trifecta(race_df: pd.DataFrame) -> tuple[int, int, int]:
 def calc_trifecta_probs_boat1_fixed(
     boat_scores: dict[int, float],
 ) -> dict[tuple[int, int, int], float]:
-    """
-    1号艇を1着固定し、2〜6号艇のスコアから3連単確率を算出する。
-    出力は必ず (1, j, k) 形式（j, k は 2〜6号艇）。
-    """
     boats = sorted(boat_scores)
-    if len(boats) != 5:
+    if len(boats) != BOATS_PER_RACE:
         raise ValueError(f"2〜6号艇のスコアが5艇分必要です: {len(boats)}艇")
 
     max_score = max(boat_scores.values())
@@ -296,13 +228,10 @@ def calc_trifecta_probs_boat1_fixed(
         for third in remaining:
             p3 = max(exp_scores[third] / rem_total, 1e-12)
             results[(TARGET_BOAT, second, third)] = p2 * p3
-
     return results
 
 
-
 def predict_race_trifecta(model, race_df, encoders):
-    """1号艇を1着固定し、2〜6号艇の順位から3連単を予測する"""
     race_df = filter_complete_races(race_df)
     if len(race_df) != 6:
         raise ValueError("6艇揃ったレースが必要です")
@@ -317,7 +246,7 @@ def predict_race_trifecta(model, race_df, encoders):
         reverse=True,
     )
     pred_top = ranking[0][0]
-    assert pred_top[0] == TARGET_BOAT, f"1号艇以外が1着になりました: {pred_top}"
+    assert pred_top[0] == TARGET_BOAT
     return pred_top, ranking
 
 
@@ -335,7 +264,7 @@ def evaluate_trifecta(model, df, encoders, label, output_path: Path):
         for n in TOP_N_LIST:
             if actual in [c for c, _ in ranking[:n]]:
                 hits[n] += 1
-        first_hits += pred_top[0] == actual[0]  # 予測1着は常に1号艇
+        first_hits += pred_top[0] == actual[0]
         second_hits += pred_top[:2] == actual[:2]
         logloss_sum += -np.log(max(prob_map.get(actual, 1e-12), 1e-12))
         n_races += 1
@@ -385,35 +314,6 @@ def save_predictions(model, df, encoders, output_path):
     print(f"  予測結果CSV: {output_path}")
 
 
-def run_shap_analysis(model, x_sample):
-    shap_values = shap.TreeExplainer(model).shap_values(x_sample)
-
-    plt.figure(figsize=(10, 6))
-    shap.summary_plot(shap_values, x_sample, plot_type="bar", show=False)
-    plt.title("特徴量", fontsize=14)
-    plt.tight_layout()
-    plt.savefig(SHAP_IMPORTANCE_PNG_PATH, dpi=150, bbox_inches="tight")
-    plt.close()
-
-    plt.figure(figsize=(10, 8))
-    shap.summary_plot(shap_values, x_sample, show=False)
-    plt.title("特徴量", fontsize=14)
-    plt.tight_layout()
-    plt.savefig(SHAP_BEESWARM_PNG_PATH, dpi=150, bbox_inches="tight")
-    plt.close()
-
-    pd.DataFrame({
-        "特徴量": x_sample.columns,
-        "重要度": np.abs(shap_values).mean(axis=0),
-    }).sort_values("重要度", ascending=False).to_csv(
-        SHAP_IMPORTANCE_CSV_PATH, index=False, encoding="UTF-8-sig"
-    )
-
-    print(f"  SHAP PNG: {SHAP_IMPORTANCE_PNG_PATH}")
-    print(f"  SHAP PNG: {SHAP_BEESWARM_PNG_PATH}")
-    print(f"  SHAP CSV: {SHAP_IMPORTANCE_CSV_PATH}")
-
-
 def main():
     optuna.logging.set_verbosity(optuna.logging.WARNING)
     font = setup_japanese_font()
@@ -429,12 +329,11 @@ def main():
     _, _, _, encoders, _, _ = prepare(df)
     model, summary, x_train, encoders, valid_df = optimize_model(df, encoders)
 
+    evaluate_trifecta(model, df, encoders, "学習データ全体", EVALUATION_CSV_PATH)
     evaluate_trifecta(
-        model, df, encoders, "学習データ全体", EVALUATION_CSV_PATH
-    )
-    holdout_path = OUTPUT_DIR / "検証_評価結果.csv"
-    evaluate_trifecta(
-        model, valid_df, encoders, f"直近{VALIDATION_YEARS}年ホールドアウト", holdout_path
+        model, valid_df, encoders,
+        f"直近{VALIDATION_YEARS}年ホールドアウト",
+        VALID_EVALUATION_CSV_PATH,
     )
 
     model.save_model(str(MODEL_PATH))
@@ -446,7 +345,11 @@ def main():
 
     print("\nSHAP分析")
     x_sample = x_train.sample(min(SHAP_SAMPLE_SIZE, len(x_train)), random_state=42)
-    run_shap_analysis(model, x_sample)
+    run_shap_analysis(
+        model, x_sample,
+        SHAP_BEESWARM_PNG_PATH, SHAP_WATERFALL_PNG_PATH,
+        title="1着1号艇予想モデル",
+    )
 
     print(f"\n保存完了:")
     print(f"  {MODEL_PATH}")
@@ -454,9 +357,8 @@ def main():
     print(f"  {OPTUNA_SUMMARY_PATH}")
     print(f"  {PREDICTIONS_CSV_PATH}")
     print(f"  {EVALUATION_CSV_PATH}")
-    print(f"  {SHAP_IMPORTANCE_PNG_PATH}")
     print(f"  {SHAP_BEESWARM_PNG_PATH}")
-    print(f"  {SHAP_IMPORTANCE_CSV_PATH}")
+    print(f"  {SHAP_WATERFALL_PNG_PATH}")
 
 
 if __name__ == "__main__":

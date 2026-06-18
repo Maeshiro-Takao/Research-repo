@@ -2,7 +2,7 @@
 1号艇が1着のレースを対象に、学習済みモデルで3連単（1-◯-◯）を予測・評価する。
 
 - 推論: 1号艇を1着固定し、2〜6号艇のランキングから2着・3着を予測
-- 評価: train_trifecta_boat1.py と同じ前処理・推論ロジック
+- 前処理・推論・評価: train_trifecta_boat1.py と同じロジック
 """
 from __future__ import annotations
 
@@ -13,47 +13,38 @@ import lightgbm as lgb
 import numpy as np
 import pandas as pd
 
-from trifecta_training_utils import ROLLING_FEATURE_EXCLUDE
+from trifecta_training_utils import (
+    CATEGORICAL_FEATURES,
+    build_feature_list,
+    run_shap_analysis,
+    setup_japanese_font,
+)
 
 BASE_DIR = Path(__file__).resolve().parent
 RACE_DATA_PATH = BASE_DIR / "レースデータ" / "丸亀テスト用_レースデータ.csv"
-OUTPUT_DIR = BASE_DIR / "models" / "1着1号艇予想"
-OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+MODEL_DIR = BASE_DIR / "models" / "1着1号艇予想"
+TEST_OUTPUT_DIR = MODEL_DIR / "テスト"
+TEST_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
-MODEL_PATH = OUTPUT_DIR / "lgbm_trifecta_boat1_model.txt"
-ENCODER_PATH = OUTPUT_DIR / "trifecta_boat1_encoders.pkl"
-PREDICTIONS_CSV_PATH = OUTPUT_DIR / "テスト_予測結果.csv"
-EVALUATION_CSV_PATH = OUTPUT_DIR / "テスト_評価結果.csv"
+MODEL_PATH = MODEL_DIR / "lgbm_trifecta_boat1_model.txt"
+ENCODER_PATH = MODEL_DIR / "trifecta_boat1_encoders.pkl"
+PREDICTIONS_CSV_PATH = TEST_OUTPUT_DIR / "予測結果.csv"
+EVALUATION_CSV_PATH = TEST_OUTPUT_DIR / "評価結果.csv"
+SHAP_BEESWARM_PNG_PATH = TEST_OUTPUT_DIR / "特徴量影響方向.png"
+SHAP_WATERFALL_PNG_PATH = TEST_OUTPUT_DIR / "特徴量ウォーターフォール.png"
 
 RACE_KEY = ["開催日", "日目", "レース"]
-RACE_ROW_KEY = ["開催日", "日目", "レース", "艇"]
-TARGET_BOAT = 1  # 1号艇を1着固定する前提
-
-RACE_EXCLUDE_COLUMNS = {"レース", "着", "選手名", "日目", "開催日", "登番", "モーター", "ボート", "艇", "3連単オッズ"}
-PLAYER_META_COLS = ["算出期間自", "算出期間至"]
-RACE_BASE_FEATURES = [
-    "展示",
-    "展示順位", "展示差", "風速", "波高", "天気", "風向",
-    "当地勝率",
-]
-TOP_N_LIST = [1, 3, 5, 10, 30]
+TARGET_BOAT = 1
+TOP_N_LIST = [1, 5, 10, 15, 20]
+BOATS_PER_RACE = 5
+SHAP_SAMPLE_SIZE = 2000
 
 FEATURES: list[str] = []
-CATEGORICAL = ["天気", "風向", "級"]
 
 
 def configure_features(df: pd.DataFrame) -> None:
     global FEATURES
-    base = [c for c in RACE_BASE_FEATURES if c in df.columns]
-    exclude = (
-        RACE_EXCLUDE_COLUMNS
-        | set(PLAYER_META_COLS)
-        | set(RACE_BASE_FEATURES)
-        | ROLLING_FEATURE_EXCLUDE
-        | {"登番"}
-    )
-    player_features = [c for c in df.columns if c not in exclude]
-    FEATURES = list(dict.fromkeys(base + player_features))
+    FEATURES = build_feature_list(df)
 
 
 def load_data() -> pd.DataFrame:
@@ -95,7 +86,6 @@ def filter_target_races(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def exclude_boat1(df: pd.DataFrame) -> pd.DataFrame:
-    """1号艇を除外し、2〜6号艇のみを残す"""
     return df.loc[df["艇"].astype(int) != TARGET_BOAT].copy()
 
 
@@ -109,11 +99,15 @@ def prepare(df: pd.DataFrame, encoders=None):
     boat_numbers = df["艇"].astype(int).values
     df = df.drop(columns=["日目", "選手名"], errors="ignore")
     encoders = encoders or {}
-    for col in CATEGORICAL:
+    for col in CATEGORICAL_FEATURES:
         if col not in encoders:
-            raise KeyError(f"エンコーダに {col} がありません。先に train_trifecta_boat1.py を実行してください。")
+            raise KeyError(
+                f"エンコーダに {col} がありません。"
+                "先に train_trifecta_boat1.py を実行してください。"
+            )
         df[col] = df[col].astype(str).map(encoders[col]).fillna(-1).astype(int)
-    x = df[FEATURES]
+    x = df[FEATURES].copy()
+    x.columns = FEATURES
     return x, boat_numbers
 
 
@@ -125,12 +119,8 @@ def get_actual_trifecta(race_df: pd.DataFrame) -> tuple[int, int, int]:
 def calc_trifecta_probs_boat1_fixed(
     boat_scores: dict[int, float],
 ) -> dict[tuple[int, int, int], float]:
-    """
-    1号艇を1着固定し、2〜6号艇のスコアから3連単確率を算出する。
-    出力は必ず (1, j, k) 形式（j, k は 2〜6号艇）。
-    """
     boats = sorted(boat_scores)
-    if len(boats) != 5:
+    if len(boats) != BOATS_PER_RACE:
         raise ValueError(f"2〜6号艇のスコアが5艇分必要です: {len(boats)}艇")
 
     max_score = max(boat_scores.values())
@@ -145,12 +135,10 @@ def calc_trifecta_probs_boat1_fixed(
         for third in remaining:
             p3 = max(exp_scores[third] / rem_total, 1e-12)
             results[(TARGET_BOAT, second, third)] = p2 * p3
-
     return results
 
 
 def predict_race_trifecta(model, race_df, encoders):
-    """1号艇を1着固定し、2〜6号艇の順位から3連単を予測する"""
     race_df = filter_complete_races(race_df)
     if len(race_df) != 6:
         raise ValueError("6艇揃ったレースが必要です")
@@ -165,7 +153,7 @@ def predict_race_trifecta(model, race_df, encoders):
         reverse=True,
     )
     pred_top = ranking[0][0]
-    assert pred_top[0] == TARGET_BOAT, f"1号艇以外が1着になりました: {pred_top}"
+    assert pred_top[0] == TARGET_BOAT
     return pred_top, ranking
 
 
@@ -183,7 +171,7 @@ def evaluate_trifecta(model, df, encoders, label, output_path: Path):
         for n in TOP_N_LIST:
             if actual in [c for c, _ in ranking[:n]]:
                 hits[n] += 1
-        first_hits += pred_top[0] == actual[0]  # 予測1着は常に1号艇
+        first_hits += pred_top[0] == actual[0]
         second_hits += pred_top[:2] == actual[:2]
         logloss_sum += -np.log(max(prob_map.get(actual, 1e-12), 1e-12))
         n_races += 1
@@ -234,6 +222,10 @@ def save_predictions(model, df, encoders, output_path):
 
 
 def main():
+    font = setup_japanese_font()
+    if font:
+        print(f"日本語フォント: {font}")
+
     model, encoders = load_model_and_encoder()
     print(f"  モデル: {MODEL_PATH.name}")
     print(f"  特徴量数: {len(model.feature_name())}")
@@ -249,9 +241,22 @@ def main():
     )
     save_predictions(model, df, encoders, PREDICTIONS_CSV_PATH)
 
+    print("\nSHAP分析")
+    x_all, _ = prepare(df, encoders)
+    x_sample = x_all.sample(min(SHAP_SAMPLE_SIZE, len(x_all)), random_state=42)
+    run_shap_analysis(
+        model,
+        x_sample,
+        SHAP_BEESWARM_PNG_PATH,
+        SHAP_WATERFALL_PNG_PATH,
+        title="1着1号艇予想モデル（テスト）",
+    )
+
     print(f"\n保存完了:")
     print(f"  {PREDICTIONS_CSV_PATH}")
     print(f"  {EVALUATION_CSV_PATH}")
+    print(f"  {SHAP_BEESWARM_PNG_PATH}")
+    print(f"  {SHAP_WATERFALL_PNG_PATH}")
 
 
 if __name__ == "__main__":

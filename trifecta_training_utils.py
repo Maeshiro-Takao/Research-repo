@@ -1,28 +1,90 @@
-"""3連単学習スクリプト共通: 時系列重み付け・年次学習"""
+"""3連単学習スクリプト共通: 特徴量・時系列重み・年次学習・SHAP"""
 from __future__ import annotations
 
-from typing import Any, Callable
+from pathlib import Path
+from typing import Callable
 
 import lightgbm as lgb
+import matplotlib
+
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+from matplotlib import font_manager
 import numpy as np
 import pandas as pd
+import shap
 
 # 新しいレースほど重みを大きく（半減期1年）
 RECENCY_HALF_LIFE_YEARS = 1.0
 # Optuna の検証に使う直近1年
 VALIDATION_YEARS = 1
 
-# 直近10年/5年の勝率・連帯率（重み付けで代替するため除外）
-ROLLING_FEATURE_EXCLUDE = {
-    "直近10年当地勝率", "直近10年2連帯率", "直近10年3連帯率",
-    "直近5年当地勝率", "直近5年2連帯率", "直近5年3連帯率",
-    "直近10年勝率", "直近5年勝率",
+RACE_EXCLUDE_COLUMNS = {
+    "レース", "着", "選手名", "日目", "開催日", "登番", "モーター", "ボート", "艇", "3連単オッズ",
 }
+PLAYER_META_COLS = ["算出期間自", "算出期間至"]
+RACE_BASE_FEATURES = [
+    "展示",
+    "展示順位", "展示差", "風速", "波高", "天気", "風向",
+    "当地勝率",
+]
+CATEGORICAL_FEATURES = ["天気", "風向", "級"]
 
 LGBM_PARAM_KEYS = (
     "num_leaves", "max_depth", "learning_rate", "min_data_in_leaf",
     "feature_fraction", "bagging_fraction", "bagging_freq", "lambda_l1", "lambda_l2",
 )
+
+BASE_LGBM_RANKER_PARAMS = {
+    "objective": "lambdarank",
+    "metric": "ndcg",
+    "ndcg_eval_at": [1, 3],
+    "verbosity": -1,
+    "seed": 42,
+    "feature_pre_filter": False,
+}
+
+JAPANESE_FONT_CANDIDATES = [
+    "Hiragino Sans",
+    "Hiragino Kaku Gothic ProN",
+    "Hiragino Maru Gothic ProN",
+    "Yu Gothic",
+    "YuGothic",
+    "Meiryo",
+    "Noto Sans CJK JP",
+    "Noto Sans JP",
+    "IPAGothic",
+    "MS Gothic",
+]
+
+
+def build_feature_list(df: pd.DataFrame) -> list[str]:
+    """学習に使用する日本語特徴量名リストを構築"""
+    base = [c for c in RACE_BASE_FEATURES if c in df.columns]
+    exclude = (
+        RACE_EXCLUDE_COLUMNS
+        | set(PLAYER_META_COLS)
+        | set(RACE_BASE_FEATURES)
+        | {"登番"}
+    )
+    player_features = [c for c in df.columns if c not in exclude]
+    return list(dict.fromkeys(base + player_features))
+
+
+def setup_japanese_font() -> str | None:
+    available = {f.name for f in font_manager.fontManager.ttflist}
+    for name in JAPANESE_FONT_CANDIDATES:
+        if name in available:
+            plt.rcParams["font.family"] = name
+            plt.rcParams["axes.unicode_minus"] = False
+            return name
+    for font in font_manager.fontManager.ttflist:
+        if any(k in font.name for k in ("Hiragino", "Noto Sans CJK", "Yu Gothic", "Meiryo")):
+            plt.rcParams["font.family"] = font.name
+            plt.rcParams["axes.unicode_minus"] = False
+            return font.name
+    plt.rcParams["axes.unicode_minus"] = False
+    return None
 
 
 def compute_recency_weights(dates: pd.Series) -> np.ndarray:
@@ -105,8 +167,66 @@ def train_incremental_by_year(
 
     meta = {
         "training_mode": "yearly_incremental",
+        "algorithm": "LightGBM Ranker (lambdarank)",
         "years": years,
         "rounds_per_year": rounds_per_year,
         "yearly_log": yearly_log,
     }
     return model, encoders, x_train, meta
+
+
+def _resolve_base_value(explainer: shap.TreeExplainer):
+    expected = explainer.expected_value
+    if isinstance(expected, (list, np.ndarray)):
+        return float(np.asarray(expected).reshape(-1)[0])
+    return float(expected)
+
+
+def run_shap_analysis(
+    model: lgb.Booster,
+    x_sample: pd.DataFrame,
+    beeswarm_path: Path,
+    waterfall_path: Path,
+    title: str = "",
+) -> None:
+    """
+    SHAP分析を出力する。
+
+    - Summary Plot (Beeswarm): 日本語特徴量名
+    - Waterfall Plot: 代表サンプル1件、日本語特徴量名
+    """
+    x_sample = x_sample.copy()
+    feature_names = [str(c) for c in x_sample.columns]
+    x_sample.columns = feature_names
+
+    explainer = shap.TreeExplainer(model)
+    shap_values = explainer.shap_values(x_sample)
+    if isinstance(shap_values, list):
+        shap_values = shap_values[0]
+
+    plt.figure(figsize=(10, 8))
+    shap.summary_plot(
+        shap_values,
+        x_sample,
+        feature_names=feature_names,
+        show=False,
+    )
+    if title:
+        plt.title(title, fontsize=14)
+    plt.tight_layout()
+    plt.savefig(beeswarm_path, dpi=150, bbox_inches="tight")
+    plt.close()
+
+    sample_idx = min(len(x_sample) // 2, len(x_sample) - 1)
+    explanation = shap.Explanation(
+        values=shap_values[sample_idx],
+        base_values=_resolve_base_value(explainer),
+        data=x_sample.iloc[sample_idx].values,
+        feature_names=feature_names,
+    )
+    shap.plots.waterfall(explanation, show=False, max_display=15)
+    plt.gcf().savefig(waterfall_path, dpi=150, bbox_inches="tight")
+    plt.close()
+
+    print(f"  SHAP Beeswarm: {beeswarm_path}")
+    print(f"  SHAP Waterfall: {waterfall_path}")
