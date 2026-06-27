@@ -1,15 +1,15 @@
 """
-丸亀の学習用/テスト用レースデータを統合して出力する。
+丸亀の年次レースデータを統合して出力する。
 
 各モジュールの役割:
   ExtRD.py : txt からの抽出のみ
   CalcRD.py: 特徴量計算のみ
   ComRD.py : 統合と CSV 出力のみ
 
-処理フロー:
-  元データ/*.txt → ExtRD.py → 抽出DataFrame
-  抽出DataFrame  → CalcRD.py → 計算DataFrame
-  抽出 + 計算    → ComRD.py  → 学習/テストCSV
+出力:
+  レースデータ/丸亀_{年}_レースデータ.csv
+  選手データ/丸亀_{年}_選手データ.csv
+  気象データ/丸亀_{年}_気象データ.csv
 
 使い方:
     python レースデータ抽出コード/ExtRD.py   # グレードCSV生成（初回・更新時）
@@ -23,19 +23,25 @@ from pathlib import Path
 import pandas as pd
 
 BASE_DIR = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(BASE_DIR))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from CalcRD import COMPUTED_COLUMNS, compute  # noqa: E402
-from ExtRD import EXTRACT_COLUMNS, RACE_ROW_KEY, extract, load_grade_race_table  # noqa: E402
+from CalcRD import compute  # noqa: E402
+from ExtRD import RACE_ROW_KEY, extract, load_grade_race_table  # noqa: E402
+from race_data_utils import (  # noqa: E402
+    MERGED_OUTPUT_COLS,
+    PLAYER_DATA_DIR,
+    RACE_DATA_DIR,
+    RACE_KEY,
+    WEATHER_DATA_DIR,
+    split_merged_dataframe,
+)
 
-OUTPUT_DIR = BASE_DIR / "レースデータ"
+OUTPUT_COLUMNS = MERGED_OUTPUT_COLS
 
-OUTPUT_COLUMNS = EXTRACT_COLUMNS + COMPUTED_COLUMNS
-
-DATASETS = [
-    {"years": range(14, 25), "output": "丸亀学習用_レースデータ.csv"},
-    {"years": range(25, 26), "output": "丸亀テスト用_レースデータ.csv"},
-]
+TRAIN_YEARS = range(14, 25)
+TEST_YEARS = range(25, 26)
+LEGACY_COMBINED_GLOB = "丸亀_*_レースデータ.csv"
 
 
 def player_years_for(years: range) -> range:
@@ -61,7 +67,17 @@ def merge_extract_and_computed(
         raise ValueError(
             f"結合後の行数が一致しません: 抽出={len(extracted)}, 結合後={len(merged)}"
         )
+
+    missing = [col for col in OUTPUT_COLUMNS if col not in merged.columns]
+    if missing:
+        raise KeyError(f"出力列が不足しています: {missing}")
+
     return merged[OUTPUT_COLUMNS]
+
+
+def history_years_for(years: range) -> range:
+    """勝率計算用の全国成績履歴読込年（当地用に12年〜）"""
+    return range(12, years.stop)
 
 
 def build_dataset(
@@ -81,6 +97,7 @@ def build_dataset(
         player_records,
         grade_df,
         rate_history_df=rate_history_df,
+        history_years=history_years_for(years),
     )
 
     print("  抽出データと計算データを結合...")
@@ -88,50 +105,81 @@ def build_dataset(
     return merged, rate_meta
 
 
+def save_yearly_files(df: pd.DataFrame, label: str) -> None:
+    if len(df) == 0:
+        print(f"  {label}: データなし")
+        return
+
+    RACE_DATA_DIR.mkdir(parents=True, exist_ok=True)
+    PLAYER_DATA_DIR.mkdir(parents=True, exist_ok=True)
+    WEATHER_DATA_DIR.mkdir(parents=True, exist_ok=True)
+
+    years = pd.to_datetime(df["開催日"]).dt.year
+    for year in sorted(years.unique()):
+        year_df = df.loc[years == year].copy()
+        race_df, player_df, weather_df = split_merged_dataframe(year_df)
+
+        race_path = RACE_DATA_DIR / f"丸亀_{int(year)}_レースデータ.csv"
+        player_path = PLAYER_DATA_DIR / f"丸亀_{int(year)}_選手データ.csv"
+        weather_path = WEATHER_DATA_DIR / f"丸亀_{int(year)}_気象データ.csv"
+
+        race_df.to_csv(race_path, index=False, encoding="UTF-8-sig")
+        player_df.to_csv(player_path, index=False, encoding="UTF-8-sig")
+        weather_df.to_csv(weather_path, index=False, encoding="UTF-8-sig")
+
+        race_count = year_df.drop_duplicates(RACE_KEY).shape[0]
+        print(f"\n  --- {int(year)}年 ---")
+        print(f"  行数: {len(year_df)} / レース数: {race_count}")
+        print(f"  レース: {race_path.name} ({len(race_df.columns)}列)")
+        print(f"  選手: {player_path.name} ({len(player_df.columns)}列)")
+        print(f"  気象: {weather_path.name} ({len(weather_df.columns)}列, {len(weather_df)}行)")
+        print(
+            "  3連単オッズあり:",
+            int(year_df["3連単オッズ"].notna().sum()),
+            f"({year_df['3連単オッズ'].notna().mean():.1%})",
+        )
+        print(
+            "  当地勝率あり:",
+            int(year_df["当地勝率"].notna().sum()),
+            f"({year_df['当地勝率'].notna().mean():.1%})",
+        )
+
+
+def remove_legacy_outputs() -> None:
+    legacy_names = ("丸亀学習用_レースデータ.csv", "丸亀テスト用_レースデータ.csv")
+    for name in legacy_names:
+        path = RACE_DATA_DIR / name
+        if path.exists():
+            path.unlink()
+            print(f"  旧ファイル削除: {path.name}")
+
+
 def main():
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     grade_df = load_grade_race_table()
     print(f"  グレードCSV: {len(grade_df)} レース")
+    print(f"  統合列数: {len(OUTPUT_COLUMNS)}")
+    print(f"  出力先: レースデータ/ 選手データ/ 気象データ/")
 
     rate_history_df: pd.DataFrame | None = None
 
-    for dataset in DATASETS:
-        print(f"\n=== {dataset['output']} ===")
-        df, rate_meta = build_dataset(
-            dataset["years"],
-            grade_df,
-            rate_history_df,
-        )
+    print(f"\n=== 学習期間 ({TRAIN_YEARS.start + 2000}〜{TRAIN_YEARS.stop - 1 + 2000}) ===")
+    train_df, rate_meta = build_dataset(TRAIN_YEARS, grade_df, rate_history_df)
+    save_yearly_files(train_df, "学習期間")
+    rate_history_df = rate_meta.copy()
 
-        output_path = OUTPUT_DIR / dataset["output"]
-        df.to_csv(output_path, index=False, encoding="UTF-8-sig")
+    print(f"\n=== テスト期間 ({TEST_YEARS.start + 2000}) ===")
+    test_df, _ = build_dataset(TEST_YEARS, grade_df, rate_history_df)
+    save_yearly_files(test_df, "テスト期間")
 
-        print("総件数:", len(df))
-        if len(df) > 0:
-            print("開催日数:", df["開催日"].nunique())
-            race_count = df.drop_duplicates(RACE_ROW_KEY[:3]).shape[0]
-            print("レース数:", race_count)
-            print(
-                "3連単オッズあり:",
-                int(df["3連単オッズ"].notna().sum()),
-                f"({df['3連単オッズ'].notna().mean():.1%})",
-            )
-            print(
-                "当地勝率あり:",
-                int(df["当地勝率"].notna().sum()),
-                f"({df['当地勝率'].notna().mean():.1%})",
-            )
-            print(
-                "選手統計(勝率)あり:",
-                int(df["勝率"].notna().sum()),
-                f"({df['勝率'].notna().mean():.1%})",
-            )
-            dup = df.duplicated(RACE_ROW_KEY + ["登番"]).sum()
-            print("重複行:", dup)
-            print("保存:", output_path)
+    remove_legacy_outputs()
 
-        if dataset["output"] == "丸亀学習用_レースデータ.csv":
-            rate_history_df = rate_meta.copy()
+    all_df = pd.concat([train_df, test_df], ignore_index=True)
+    print("\n=== 全体 ===")
+    print("総件数:", len(all_df))
+    print("開催日数:", all_df["開催日"].nunique())
+    print("レース数:", all_df.drop_duplicates(RACE_KEY).shape[0])
+    dup = all_df.duplicated(RACE_ROW_KEY + ["登番"]).sum()
+    print("重複行:", dup)
 
 
 if __name__ == "__main__":

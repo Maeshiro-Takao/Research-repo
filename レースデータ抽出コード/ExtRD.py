@@ -28,8 +28,8 @@ RACE_ROW_KEY = ["開催日", "日目", "レース", "艇"]
 GRADE_COLUMNS = ["開催日", "日目", "レース", "グレード", "レース名", "優勝戦"]
 
 PLAYER_EXTRACT_COLS = [
-    "級", "身長", "体重", "勝率", "複勝率",
-    "優出回数", "優勝回数", "平均スタートタイミング",
+    "級", "身長", "体重",
+    "平均スタートタイミング",
 ]
 for _course in range(1, 7):
     PLAYER_EXTRACT_COLS += [
@@ -38,8 +38,6 @@ for _course in range(1, 7):
         f"{_course}コース平均スタートタイミング",
         f"{_course}コース平均スタート順位",
     ]
-PLAYER_EXTRACT_COLS += ["算出期間自", "算出期間至"]
-
 EXTRACT_COLUMNS = [
     "開催日", "日目", "レース",
     "着", "艇",
@@ -735,6 +733,149 @@ def extract_race_dataframe(years: range) -> pd.DataFrame:
     return pd.DataFrame(extract_race_records(years))
 
 
+HISTORY_COLUMNS = ["開催日", "日目", "レース", "登番", "着", "モーター", "ボート", "場"]
+KBGN_RE = re.compile(r"^(\d+)KBGN$")
+KEND_RE = re.compile(r"^(\d+)KEND$")
+
+
+def process_history_block(
+    block_lines: list[str],
+    fallback_date: str | None,
+    venue_code: str,
+) -> list[dict]:
+    """全場ブロックから勝率計算用の最小レース結果を抽出する"""
+    meeting_date, day_number = parse_block_date(block_lines, fallback_date)
+    if meeting_date is None or day_number is None:
+        return []
+
+    records: list[dict] = []
+    current_race = None
+    race_rows: list[dict] = []
+    race_invalid = False
+
+    def flush_race() -> None:
+        nonlocal race_rows, race_invalid, current_race
+        if race_invalid or len(race_rows) != 6 or current_race is None:
+            race_rows = []
+            race_invalid = False
+            return
+        for row in race_rows:
+            records.append(
+                {
+                    "開催日": meeting_date,
+                    "日目": day_number,
+                    "レース": current_race,
+                    "登番": row["登番"],
+                    "着": row["着"],
+                    "モーター": row["モーター"],
+                    "ボート": row["ボート"],
+                    "場": venue_code,
+                }
+            )
+        race_rows = []
+        race_invalid = False
+
+    for line in block_lines:
+        if not line:
+            continue
+
+        race_match = RACE_HEADER.match(line)
+        if race_match:
+            flush_race()
+            current_race = int(race_match.group(1))
+            continue
+
+        parts = line.split()
+        if len(parts) < 8:
+            continue
+
+        if parts[0] not in {"01", "02", "03", "04", "05", "06"}:
+            if INVALID_RESULT.fullmatch(parts[0]):
+                race_invalid = True
+            continue
+
+        if current_race is None:
+            continue
+
+        try:
+            chaku = int(parts[0])
+            toban = int(parts[2])
+            name_end = None
+            for i in range(3, len(parts)):
+                if parts[i].isdigit():
+                    name_end = i
+                    break
+            if name_end is None or len(parts[name_end:]) < 2:
+                continue
+            race_rows.append(
+                {
+                    "着": chaku,
+                    "登番": toban,
+                    "モーター": int(parts[name_end]),
+                    "ボート": int(parts[name_end + 1]),
+                }
+            )
+        except (ValueError, IndexError):
+            continue
+
+    flush_race()
+    return records
+
+
+def extract_history_records(years: range) -> list[dict]:
+    """全競艇場の成績履歴（勝率・連対率計算用）"""
+    records: list[dict] = []
+
+    for year in years:
+        year_dir = RACE_INPUT_DIR / f"{year}年"
+        if not year_dir.exists():
+            continue
+
+        for txt_file in sorted(year_dir.rglob("*.TXT"), key=file_sort_key):
+            fallback_date = extract_date_from_filename(txt_file.name)
+            with open(txt_file, encoding="UTF-8") as f:
+                lines = f.readlines()
+
+            in_block = False
+            venue_code: str | None = None
+            block_lines: list[str] = []
+
+            for raw in lines:
+                s = raw.strip()
+                m_bgn = KBGN_RE.match(s)
+                if m_bgn:
+                    if in_block and block_lines and venue_code is not None:
+                        records.extend(
+                            process_history_block(block_lines, fallback_date, venue_code)
+                        )
+                    venue_code = m_bgn.group(1)
+                    in_block = True
+                    block_lines = []
+                    continue
+
+                if KEND_RE.match(s):
+                    if in_block and block_lines and venue_code is not None:
+                        records.extend(
+                            process_history_block(block_lines, fallback_date, venue_code)
+                        )
+                    in_block = False
+                    venue_code = None
+                    block_lines = []
+                    continue
+
+                if in_block:
+                    block_lines.append(s)
+
+    return records
+
+
+def extract_history_dataframe(years: range) -> pd.DataFrame:
+    records = extract_history_records(years)
+    if not records:
+        return pd.DataFrame(columns=HISTORY_COLUMNS)
+    return pd.DataFrame(records)
+
+
 def extract(
     years: range,
     player_years: range | None = None,
@@ -767,10 +908,6 @@ def extract(
             merged[col] = pd.NA
 
     merged = merged[EXTRACT_COLUMNS]
-    if "算出期間自" in merged.columns:
-        merged["算出期間自"] = pd.to_datetime(merged["算出期間自"]).dt.strftime("%Y-%m-%d")
-        merged["算出期間至"] = pd.to_datetime(merged["算出期間至"]).dt.strftime("%Y-%m-%d")
-
     return merged, player_records
 
 

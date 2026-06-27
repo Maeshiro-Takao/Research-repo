@@ -1,10 +1,14 @@
 """
 ExtRD.py で抽出した DataFrame から学習用特徴量を計算する。
 
-- txt から直接取得できない項目は全てここで計算
-- 計算結果のみを DataFrame として返す
+勝率 = 着順点合計 / 出走数（SG+2, G1/G2+1, 優勝戦+1）
+2連率/3連率 = 連対率（%）
 
-ComRD から import して使用する。
+算出期間:
+  全国: 開催初日の月を含む過去6ヶ月（今節除外）〜前検日前日
+  当地: 開催初日月の24ヶ月前の年1/1（今節除外）〜前検日前日（12-13年成績含む）
+  モーター: 11月始まりの年度内・使用開始から最大1年（今節除外）
+  ボート: 7月始まりの年度内・使用開始から最大1年（今節除外）
 """
 from __future__ import annotations
 
@@ -13,39 +17,77 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from ExtRD import RACE_ROW_KEY, pick_player_period_row
+from ExtRD import (
+    MARUGAME_CODE,
+    RACE_ROW_KEY,
+    extract_history_dataframe,
+)
 
 RACE_KEY = ["開催日", "日目", "レース"]
 
-PLAYER_COMPUTED_COLS = ["1着率", "2着率", "3着率"]
+NATIONAL_COLS = ["勝率", "2連率", "3連率"]
+LOCAL_COLS = ["当地勝率", "当地2連率", "当地3連率"]
+MOTOR_COLS = ["モーター勝率", "モーター2連率", "モーター3連率"]
+BOAT_COLS = ["ボート勝率", "ボート2連率", "ボート3連率"]
+PERIOD_COLS = ["算出期間自", "算出期間至"]
 
-LOCAL_COMPUTED_COLS = ["当地勝率"]
-
-COMPUTED_COLUMNS = LOCAL_COMPUTED_COLS + PLAYER_COMPUTED_COLS
+COMPUTED_COLUMNS = NATIONAL_COLS + LOCAL_COLS + MOTOR_COLS + BOAT_COLS + PERIOD_COLS
 
 PLACE_POINTS = {1: 10, 2: 8, 3: 6, 4: 4, 5: 2, 6: 1}
 LOCAL_RATE_META_COLS = [
     "開催日", "日目", "レース", "艇", "登番", "着", "grade", "is_championship",
 ]
 
-RANK3_COLUMNS = [f"{c}コース3着回数" for c in range(1, 7)]
-DEDUP_KEY = ["登番", "年", "期"]
+MOTOR_RESET_MONTH = 11
+BOAT_RESET_MONTH = 7
+LOCAL_HISTORY_START_YEAR = 12
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 OUTPUT_DIR = BASE_DIR / "編集データ"
 
 
-def round_rate(value: float | None, decimals: int) -> float | None:
+def round_rate(value: float | None, decimals: int) -> float:
     if value is None or pd.isna(value):
-        return None
+        return 0.0
     return round(float(value), decimals)
+
+
+def normalize_grade(grade: str | None) -> str:
+    if grade is None or pd.isna(grade):
+        return "一般"
+    text = str(grade).strip().upper()
+    if text in {"SG", "G1", "G2"}:
+        return text
+    return "一般"
+
+
+def grade_point_bonus(grade: str | None) -> int:
+    g = normalize_grade(grade)
+    if g == "SG":
+        return 2
+    if g in {"G1", "G2"}:
+        return 1
+    return 0
+
+
+def championship_point_bonus(is_championship: bool) -> int:
+    return 1 if is_championship else 0
+
+
+def calc_place_points(rank: int, grade: str | None, is_championship: bool) -> int:
+    if rank not in PLACE_POINTS:
+        return 0
+    return (
+        PLACE_POINTS[rank]
+        + grade_point_bonus(grade)
+        + championship_point_bonus(is_championship)
+    )
 
 
 def attach_grade_info(
     race_df: pd.DataFrame,
     grade_df: pd.DataFrame,
 ) -> pd.DataFrame:
-    """丸亀グレード別レースCSVからグレード・優勝戦をレース行へ付与"""
     grade_cols = grade_df.rename(
         columns={"グレード": "grade", "優勝戦": "is_championship"}
     )
@@ -59,135 +101,307 @@ def attach_grade_info(
     return merged
 
 
-def add_place_rates(df: pd.DataFrame) -> pd.DataFrame:
-    df = df.copy()
-    third = df[RANK3_COLUMNS].fillna(0).sum(axis=1)
-    runs = df["出走回数"].fillna(0)
-
-    for name, counts in (
-        ("1着率", df["1着回数"].fillna(0)),
-        ("2着率", df["2着回数"].fillna(0)),
-        ("3着率", third),
-    ):
-        df[name] = [
-            round_rate(c / run * 100, 1) if run > 0 else None
-            for c, run in zip(counts, runs)
-        ]
-    return df
+def meet_opening_date(race_date: pd.Timestamp, day_number: int) -> pd.Timestamp:
+    return race_date - pd.Timedelta(days=int(day_number) - 1)
 
 
-def build_player_computed_df(records: list[dict]) -> pd.DataFrame:
-    """選手生データから計算列のみを生成"""
-    df = pd.DataFrame(records)
-    if len(df) == 0:
-        return pd.DataFrame(columns=["登番", "算出期間自", "算出期間至"] + PLAYER_COMPUTED_COLS)
-
-    df = add_place_rates(df)
-    df["算出期間自"] = pd.to_datetime(df["算出期間自"])
-    df["算出期間至"] = pd.to_datetime(df["算出期間至"])
-    return df[["登番", "算出期間自", "算出期間至"] + PLAYER_COMPUTED_COLS]
+def zenken_prev_day(opening_date: pd.Timestamp) -> pd.Timestamp:
+    """前検日前日 = 開催初日の2日前"""
+    return opening_date - pd.Timedelta(days=2)
 
 
-def attach_computed_player_fields(
-    race_df: pd.DataFrame,
-    player_computed_df: pd.DataFrame,
-) -> pd.DataFrame:
-    """計算済み選手統計をレース行キーへ付与"""
-    player_groups = {
-        int(toban): group.sort_values("算出期間自").reset_index(drop=True)
-        for toban, group in player_computed_df.groupby("登番")
-    }
-
-    matched_cols = {col: [] for col in PLAYER_COMPUTED_COLS}
-    race = race_df.copy()
-    race["開催日"] = pd.to_datetime(race["開催日"])
-
-    for row in race.itertuples(index=False):
-        group = player_groups.get(int(row.登番))
-        if group is None or len(group) == 0:
-            for col in PLAYER_COMPUTED_COLS:
-                matched_cols[col].append(pd.NA)
-            continue
-
-        pick = pick_player_period_row(group, row.開催日)
-        if pick is None:
-            for col in PLAYER_COMPUTED_COLS:
-                matched_cols[col].append(pd.NA)
-            continue
-
-        for col in PLAYER_COMPUTED_COLS:
-            matched_cols[col].append(pick[col])
-
-    out = race_df[RACE_ROW_KEY].copy()
-    for col in PLAYER_COMPUTED_COLS:
-        out[col] = matched_cols[col]
-    return out
+def national_period(opening_date: pd.Timestamp) -> tuple[pd.Timestamp, pd.Timestamp]:
+    opening_month = opening_date.to_period("M")
+    start = (opening_month - 5).to_timestamp()
+    end = zenken_prev_day(opening_date)
+    return start, end
 
 
-def normalize_grade(grade: str | None) -> str:
-    if grade is None or pd.isna(grade):
-        return "一般"
-    text = str(grade).strip().upper()
-    if text in {"SG", "G1", "G2"}:
-        return text
-    return "一般"
+def local_period(opening_date: pd.Timestamp) -> tuple[pd.Timestamp, pd.Timestamp]:
+    year = (opening_date - pd.DateOffset(months=24)).year
+    start = pd.Timestamp(year=year, month=1, day=1)
+    end = zenken_prev_day(opening_date)
+    return start, end
 
 
-def grade_point_bonus(grade: str | None) -> int:
-    """SG+2点、G1/G2+1点、一般+0点"""
-    match normalize_grade(grade):
-        case "SG":
-            return 2
-        case "G1" | "G2":
-            return 1
-        case _:
-            return 0
+def equipment_season_start(race_date: pd.Timestamp, reset_month: int) -> pd.Timestamp:
+    """モーター=11月、ボート=7月を境に年度を区切る"""
+    if race_date.month >= reset_month:
+        return pd.Timestamp(race_date.year, reset_month, 1)
+    return pd.Timestamp(race_date.year - 1, reset_month, 1)
 
 
-def championship_point_bonus(is_championship: bool) -> int:
-    """各グレード（一般/SG/G1/G2）の優勝戦は+1点"""
-    return 1 if is_championship else 0
+def equipment_period(
+    usage_start: pd.Timestamp,
+    season_start: pd.Timestamp,
+    opening_date: pd.Timestamp,
+) -> tuple[pd.Timestamp, pd.Timestamp]:
+    start = max(usage_start, season_start)
+    end = min(
+        zenken_prev_day(opening_date),
+        usage_start + pd.Timedelta(days=365) - pd.Timedelta(days=1),
+    )
+    return start, end
 
 
-def calc_place_points(rank: int, grade: str | None, is_championship: bool) -> int:
-    """
-    着順点 = 基本点（一般レース含む全レース） + グレード加算 + 優勝戦加算
+def compute_win_and_ren_rates(
+    ranks: np.ndarray,
+    points: np.ndarray | None = None,
+) -> tuple[float, float, float]:
+    runs = len(ranks)
+    if runs <= 0:
+        return 0.0, 0.0, 0.0
 
-    - 基本点: 1着10 / 2着8 / 3着6 / 4着4 / 5着2 / 6着1
-    - SG競走: +2点、G1/G2競走: +1点
-    - 各競走の優勝戦: さらに+1点
-    """
-    if rank not in PLACE_POINTS:
-        return 0
-    base = PLACE_POINTS[rank]
+    top2 = int(np.sum(ranks <= 2))
+    top3 = int(np.sum(ranks <= 3))
+
+    if points is not None and len(points) > 0:
+        win_rate = float(np.sum(points)) / runs
+    else:
+        win_rate = int(np.sum(ranks == 1)) / runs * 10
+
     return (
-        base
-        + grade_point_bonus(grade)
-        + championship_point_bonus(is_championship)
+        round_rate(win_rate, 2),
+        round_rate(top2 / runs * 100, 1),
+        round_rate(top3 / runs * 100, 1),
     )
 
 
-def _calc_win_rate(stats: dict | None) -> float:
-    """当地勝率 = 10 × √(平均着順点 ÷ 10)。算出不可は 0"""
-    if not stats or stats["runs"] <= 0:
-        return 0.0
-    value = 10 * np.sqrt(stats["points"] / stats["runs"] / 10)
-    return round(float(value), 2)
+def _merge_grade_columns(df: pd.DataFrame, grade_df: pd.DataFrame) -> pd.DataFrame:
+    grade_cols = grade_df.rename(
+        columns={"グレード": "grade", "優勝戦": "is_championship"}
+    ).copy()
+    grade_cols["開催日"] = pd.to_datetime(grade_cols["開催日"])
+    merged = df.merge(
+        grade_cols[["開催日", "日目", "レース", "grade", "is_championship"]],
+        on=RACE_KEY,
+        how="left",
+    )
+    merged["grade"] = merged["grade"].map(normalize_grade)
+    merged["is_championship"] = merged["is_championship"].fillna(False).astype(bool)
+    return merged
 
 
-def _update_player_stats(stats: dict, points: int) -> None:
-    stats["runs"] += 1
-    stats["points"] += points
+def _prepare_history(history_df: pd.DataFrame) -> pd.DataFrame:
+    df = history_df.copy()
+    df["開催日"] = pd.to_datetime(df["開催日"])
+    df["日目"] = df["日目"].astype(int)
+    df["登番"] = df["登番"].astype(int)
+    df["着"] = df["着"].astype(int)
+    df["opening_date"] = df.apply(
+        lambda r: meet_opening_date(r["開催日"], r["日目"]),
+        axis=1,
+    )
+    return df.sort_values(["開催日", "登番"]).reset_index(drop=True)
 
 
-def _empty_player_stats() -> dict:
-    return {"runs": 0, "points": 0}
+def _add_points_column(df: pd.DataFrame, *, with_grade: bool) -> pd.DataFrame:
+    out = df.copy()
+    if with_grade:
+        out["points"] = out.apply(
+            lambda r: calc_place_points(int(r["着"]), r["grade"], bool(r["is_championship"])),
+            axis=1,
+        )
+    else:
+        out["points"] = out["着"].map(PLACE_POINTS).fillna(0).astype(int)
+    return out
 
 
-def _as_bool(value) -> bool:
-    if pd.isna(value):
-        return False
-    return bool(value)
+def _prepare_national_history(
+    history_df: pd.DataFrame,
+    grade_df: pd.DataFrame,
+) -> pd.DataFrame:
+    df = _prepare_history(history_df)
+    df = _merge_grade_columns(df, grade_df)
+    df["points"] = df.apply(
+        lambda r: calc_place_points(
+            int(r["着"]),
+            r["grade"] if r["場"] == MARUGAME_CODE else "一般",
+            bool(r["is_championship"]) if r["場"] == MARUGAME_CODE else False,
+        ),
+        axis=1,
+    )
+    return df
+
+
+def _build_local_history(national_hist: pd.DataFrame, grade_df: pd.DataFrame) -> pd.DataFrame:
+    """丸亀成績（12-13年含む）から当地勝率用履歴を構築"""
+    del grade_df
+    mg = national_hist.loc[national_hist["場"] == MARUGAME_CODE].copy()
+    return mg.sort_values(["開催日", "登番"]).reset_index(drop=True)
+
+
+def _first_usage_in_season(
+    history: pd.DataFrame,
+    key_col: str,
+    reset_month: int,
+) -> dict[tuple, pd.Timestamp]:
+    usage: dict[tuple, pd.Timestamp] = {}
+    for row in history.sort_values("開催日").itertuples(index=False):
+        season_start = equipment_season_start(row.開催日, reset_month)
+        key = (row.場, int(getattr(row, key_col)), season_start)
+        if key not in usage:
+            usage[key] = row.開催日
+    return usage
+
+
+def _filter_window_arrays(
+    dates: np.ndarray,
+    openings: np.ndarray,
+    start: pd.Timestamp,
+    end: pd.Timestamp,
+    *,
+    exclude_opening: pd.Timestamp | None = None,
+    is_marugame: np.ndarray | None = None,
+) -> np.ndarray:
+    mask = (dates >= np.datetime64(start)) & (dates <= np.datetime64(end))
+    if exclude_opening is not None and is_marugame is not None:
+        mask &= ~(
+            (openings == np.datetime64(exclude_opening)) & is_marugame
+        )
+    return mask
+
+
+def _group_arrays(group: pd.DataFrame | None, *, local: bool = False):
+    if group is None or len(group) == 0:
+        return None
+    is_mg = np.ones(len(group), dtype=bool) if local else (group["場"] == MARUGAME_CODE).to_numpy()
+    return {
+        "dates": group["開催日"].to_numpy(dtype="datetime64[ns]"),
+        "openings": group["opening_date"].to_numpy(dtype="datetime64[ns]"),
+        "ranks": group["着"].to_numpy(dtype=int),
+        "points": group["points"].to_numpy(dtype=float),
+        "is_marugame": is_mg,
+    }
+
+
+def compute_rates_for_targets(
+    targets: pd.DataFrame,
+    national_hist: pd.DataFrame,
+    local_hist: pd.DataFrame,
+    motor_usage: dict[tuple, pd.Timestamp],
+    boat_usage: dict[tuple, pd.Timestamp],
+) -> pd.DataFrame:
+    nat_groups = {
+        int(t): _group_arrays(g.sort_values("開催日").reset_index(drop=True))
+        for t, g in national_hist.groupby("登番")
+    }
+    loc_groups = {
+        int(t): _group_arrays(g.sort_values("開催日").reset_index(drop=True), local=True)
+        for t, g in local_hist.groupby("登番")
+    }
+    motor_groups = {
+        int(m): _group_arrays(g.sort_values("開催日").reset_index(drop=True), local=True)
+        for m, g in local_hist.groupby("モーター")
+    }
+    boat_groups = {
+        int(b): _group_arrays(g.sort_values("開催日").reset_index(drop=True), local=True)
+        for b, g in local_hist.groupby("ボート")
+    }
+
+    rows: list[dict] = []
+    for row in targets.itertuples(index=False):
+        race_date = pd.Timestamp(row.開催日)
+        day_number = int(row.日目)
+        toban = int(row.登番)
+        motor = int(row.モーター)
+        boat = int(row.ボート)
+        opening = meet_opening_date(race_date, day_number)
+
+        nat_start, nat_end = national_period(opening)
+        loc_start, loc_end = local_period(opening)
+
+        nat = nat_groups.get(toban)
+        nat_mask = (
+            _filter_window_arrays(
+                nat["dates"], nat["openings"], nat_start, nat_end,
+                exclude_opening=opening, is_marugame=nat["is_marugame"],
+            )
+            if nat is not None
+            else np.array([], dtype=bool)
+        )
+
+        loc = loc_groups.get(toban)
+        loc_mask = (
+            _filter_window_arrays(
+                loc["dates"], loc["openings"], loc_start, loc_end,
+                exclude_opening=opening, is_marugame=loc["is_marugame"],
+            )
+            if loc is not None
+            else np.array([], dtype=bool)
+        )
+
+        motor_season = equipment_season_start(race_date, MOTOR_RESET_MONTH)
+        motor_key = (MARUGAME_CODE, motor, motor_season)
+        motor_start = motor_usage.get(motor_key, race_date)
+        mot_start, mot_end = equipment_period(motor_start, motor_season, opening)
+        mot = motor_groups.get(motor)
+        mot_mask = (
+            _filter_window_arrays(
+                mot["dates"], mot["openings"], mot_start, mot_end,
+                exclude_opening=opening, is_marugame=mot["is_marugame"],
+            )
+            if mot is not None
+            else np.array([], dtype=bool)
+        )
+
+        boat_season = equipment_season_start(race_date, BOAT_RESET_MONTH)
+        boat_key = (MARUGAME_CODE, boat, boat_season)
+        boat_start = boat_usage.get(boat_key, race_date)
+        boat_start_d, boat_end_d = equipment_period(boat_start, boat_season, opening)
+        bt = boat_groups.get(boat)
+        boat_mask = (
+            _filter_window_arrays(
+                bt["dates"], bt["openings"], boat_start_d, boat_end_d,
+                exclude_opening=opening, is_marugame=bt["is_marugame"],
+            )
+            if bt is not None
+            else np.array([], dtype=bool)
+        )
+
+        win, r2, r3 = compute_win_and_ren_rates(
+            nat["ranks"][nat_mask] if nat_mask.any() else np.array([]),
+            nat["points"][nat_mask] if nat_mask.any() else None,
+        )
+        loc_win, loc_r2, loc_r3 = compute_win_and_ren_rates(
+            loc["ranks"][loc_mask] if loc_mask.any() else np.array([]),
+            loc["points"][loc_mask] if loc_mask.any() else None,
+        )
+        mot_win, mot_r2, mot_r3 = compute_win_and_ren_rates(
+            mot["ranks"][mot_mask] if mot_mask.any() else np.array([]),
+            mot["points"][mot_mask] if mot_mask.any() else None,
+        )
+        boat_win, boat_r2, boat_r3 = compute_win_and_ren_rates(
+            bt["ranks"][boat_mask] if boat_mask.any() else np.array([]),
+            bt["points"][boat_mask] if boat_mask.any() else None,
+        )
+
+        rows.append(
+            {
+                "開催日": row.開催日.strftime("%Y-%m-%d")
+                if hasattr(row.開催日, "strftime")
+                else row.開催日,
+                "日目": row.日目,
+                "レース": row.レース,
+                "艇": row.艇,
+                "勝率": win,
+                "2連率": r2,
+                "3連率": r3,
+                "当地勝率": loc_win,
+                "当地2連率": loc_r2,
+                "当地3連率": loc_r3,
+                "モーター勝率": mot_win,
+                "モーター2連率": mot_r2,
+                "モーター3連率": mot_r3,
+                "ボート勝率": boat_win,
+                "ボート2連率": boat_r2,
+                "ボート3連率": boat_r3,
+                "算出期間自": nat_start.strftime("%Y-%m-%d"),
+                "算出期間至": nat_end.strftime("%Y-%m-%d"),
+            }
+        )
+
+    return pd.DataFrame(rows)
 
 
 def compute_local_win_rates(
@@ -195,52 +409,10 @@ def compute_local_win_rates(
     grade_df: pd.DataFrame,
     history_df: pd.DataFrame | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """
-    丸亀成績から当地勝率を算出する。
-
-    着順点（当レース以前の成績から平均）:
-      - 一般レース含む全レースに基本点を付与
-      - SG競走 +2点、G1/G2競走 +1点
-      - 各競走（一般/SG/G1/G2）の優勝戦はさらに +1点
-    当地勝率 = 10 × √(平均着順点 ÷ 10)
-    過去成績がなく算出できない場合は 0
-    """
+    del history_df
     work_df = attach_grade_info(extracted_df, grade_df)
-    target_rates = work_df[LOCAL_RATE_META_COLS].copy()
-
-    if history_df is not None and len(history_df) > 0:
-        timeline = pd.concat([history_df[LOCAL_RATE_META_COLS], target_rates], ignore_index=True)
-        target_len = len(target_rates)
-    else:
-        timeline = target_rates.copy()
-        target_len = len(extracted_df)
-
-    timeline = timeline.sort_values(
-        ["開催日", "日目", "レース", "艇"]
-    ).reset_index(drop=True)
-
-    player_stats: dict[int, dict] = {}
-    local_rates: list[float] = []
-
-    for row in timeline.itertuples(index=False):
-        toban = int(row.登番)
-        rank = int(row.着)
-        grade = normalize_grade(row.grade)
-        is_championship = _as_bool(row.is_championship)
-        stats = player_stats.setdefault(toban, _empty_player_stats())
-
-        local_rates.append(_calc_win_rate(stats))
-
-        points = calc_place_points(rank, grade, is_championship)
-        if rank in PLACE_POINTS:
-            _update_player_stats(stats, points)
-
-    computed = extracted_df[RACE_ROW_KEY].copy()
-    computed["当地勝率"] = local_rates[-target_len:]
-    computed["当地勝率"] = computed["当地勝率"].fillna(0.0)
-
     rate_meta = work_df[LOCAL_RATE_META_COLS].copy()
-    return computed, rate_meta
+    return pd.DataFrame(columns=RACE_ROW_KEY + ["当地勝率"]), rate_meta
 
 
 def compute(
@@ -248,55 +420,51 @@ def compute(
     player_records: list[dict],
     grade_df: pd.DataFrame,
     rate_history_df: pd.DataFrame | None = None,
+    history_years: range | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """
-    抽出DataFrameと選手生データから計算列のみを生成する。
+    del player_records, rate_history_df
 
-    Returns:
-        (計算DataFrame[RACE_ROW_KEY + COMPUTED_COLUMNS], 当地勝率履歴用メタ)
-    """
-    local_df, rate_meta = compute_local_win_rates(
-        extracted_df, grade_df, rate_history_df
-    )
-    player_computed_df = build_player_computed_df(player_records)
-    player_df = attach_computed_player_fields(extracted_df, player_computed_df)
+    work_df = attach_grade_info(extracted_df, grade_df)
+    rate_meta = work_df[LOCAL_RATE_META_COLS].copy()
 
-    computed = local_df.merge(
-        player_df,
-        on=RACE_ROW_KEY,
-        how="left",
-        validate="one_to_one",
+    if history_years is None:
+        years = pd.to_datetime(extracted_df["開催日"]).dt.year
+        min_y = max(LOCAL_HISTORY_START_YEAR, int(years.min()) - 2)
+        max_y = int(years.max())
+        history_years = range(min_y % 100, max_y % 100 + 1)
+    else:
+        start = min(history_years.start, LOCAL_HISTORY_START_YEAR)
+        history_years = range(start, history_years.stop)
+
+    print(f"    全国履歴読込: {history_years.start + 2000}〜{history_years.stop - 1 + 2000}年...")
+    national_raw = extract_history_dataframe(history_years)
+    if len(national_raw) == 0:
+        raise ValueError("全国成績履歴が空です。競走成績TXTを確認してください。")
+
+    national_hist = _prepare_national_history(national_raw, grade_df)
+    local_hist = _build_local_history(national_hist, grade_df)
+
+    motor_usage = _first_usage_in_season(local_hist, "モーター", MOTOR_RESET_MONTH)
+    boat_usage = _first_usage_in_season(local_hist, "ボート", BOAT_RESET_MONTH)
+
+    targets = work_df[
+        RACE_ROW_KEY + ["登番", "モーター", "ボート"]
+    ].copy()
+    targets["開催日"] = pd.to_datetime(targets["開催日"])
+
+    computed = compute_rates_for_targets(
+        targets,
+        national_hist,
+        local_hist,
+        motor_usage,
+        boat_usage,
     )
+
     return computed[RACE_ROW_KEY + COMPUTED_COLUMNS], rate_meta
 
 
-DATASETS = [
-    {"years": range(14, 25), "output": "丸亀学習用_選手データ.csv"},
-    {"years": range(25, 26), "output": "丸亀テスト用_選手データ.csv"},
-]
-
-
 def main():
-    """計算済み選手データをCSV出力（デバッグ・確認用）"""
-    from ExtRD import extract_player_records
-
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-
-    for dataset in DATASETS:
-        print(f"\n=== {dataset['output']} ===")
-        records = extract_player_records(dataset["years"])
-        df = build_player_computed_df(records)
-
-        output_path = OUTPUT_DIR / dataset["output"]
-        df.to_csv(output_path, index=False, encoding="UTF-8-sig")
-
-        print("総件数:", len(df))
-        if len(df) > 0:
-            meta = pd.DataFrame(records)
-            print("登番数:", df["登番"].nunique())
-            print("年×期:", meta.groupby(["年", "期"]).size().to_dict())
-            print("重複件数:", meta.duplicated(DEDUP_KEY).sum())
-            print("保存:", output_path)
+    print("CalcRD: 成績履歴ベースの勝率計算は ComRD.py 経由で実行してください。")
 
 
 if __name__ == "__main__":

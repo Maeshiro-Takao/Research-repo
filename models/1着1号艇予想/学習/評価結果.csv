@@ -1,2 +1,0 @@
-﻿label,n_races,first_hit_rate,exacta_hit_rate,trifecta_top1_rate,trifecta_avg_neg_log_prob,trifecta_top3_rate,trifecta_top5_rate,trifecta_top10_rate,trifecta_top30_rate
-学習データ全体,12848,1.0,0.47501556662515565,0.20532378580323785,2.5623536802140174,0.45952677459526775,0.6183841843088418,0.8339819427148194,1.0
