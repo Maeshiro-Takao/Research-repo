@@ -1,10 +1,14 @@
 """
-1レース6艇 + LightGBM Ranker（Walk Forward 法）
+1レース6艇 LightGBM Ranker + Plackett–Luce 3連単予想
+
+パイプライン:
+  6艇ランキング学習（LightGBM Ranker, group=6, ラベル=着順）
+  → 各艇スコア推論
+  → Plackett–Luce で120通り3連単確率
 
 - データ: レース/選手/気象 CSV（2014〜2024年）
-- Optuna: 最終年を除く学習 / 最終年で検証（高速化）
-- Walk Forward: ベストパラメータ確定後に1回だけ実行（NDCG@1/3・学習曲線）
-- 出力: モデル、Walk Forward 評価 CSV、学習曲線 PNG、SHAP、3連単 TOP1/5/10/20
+- Optuna + Walk Forward 評価
+- 保存先: models/3連単予想/（既存 models/レース着順ランキング/ とは別）
 """
 from __future__ import annotations
 
@@ -22,12 +26,17 @@ import optuna
 import pandas as pd
 import shap
 
+from plackett_luce import (
+    combo_to_str,
+    compute_ndcg_at_k,
+    predict_trifecta_from_scores,
+    prob_sum,
+)
 from trifecta_training_utils import (
     BASE_LGBM_RANKER_PARAMS,
     RECENCY_HALF_LIFE_YEARS,
     UNKNOWN_CATEGORY_TOKEN,
     build_lgbm_params,
-    calc_trifecta_probs_from_scores,
     compute_recency_weights,
     get_actual_trifecta,
     get_calendar_years,
@@ -46,7 +55,7 @@ WEATHER_DATA_DIR = BASE_DIR / "気象データ"
 TRAIN_YEARS = range(2014, 2025)
 TEST_YEARS = range(2025, 2026)
 
-MODEL_DIR = BASE_DIR / "models" / "レース着順ランキング"
+MODEL_DIR = BASE_DIR / "models" / "3連単予想"
 OUTPUT_DIR = MODEL_DIR / "学習"
 MODEL_DIR.mkdir(parents=True, exist_ok=True)
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -57,6 +66,8 @@ CONFIG_PATH = MODEL_DIR / "race_ranker_config.json"
 WALK_FORWARD_CSV_PATH = OUTPUT_DIR / "WalkForward評価.csv"
 LEARNING_CURVE_PNG = OUTPUT_DIR / "学習曲線.png"
 EVALUATION_CSV_PATH = OUTPUT_DIR / "評価結果.csv"
+PREDICTIONS_CSV_PATH = OUTPUT_DIR / "予測結果.csv"
+PREDICTIONS_DETAIL_CSV_PATH = OUTPUT_DIR / "予測結果_120通り.csv"
 SHAP_BEESWARM_PNG = OUTPUT_DIR / "特徴量影響方向.png"
 SHAP_WATERFALL_PNG = OUTPUT_DIR / "特徴量ウォーターフォール.png"
 SHAP_IMPORTANCE_PNG = OUTPUT_DIR / "特徴量重要度.png"
@@ -83,7 +94,9 @@ MERGED_COLS = (
 )
 
 REFERENCE_DATE = pd.Timestamp("2014-01-01")
-CATEGORICAL_COLS = ["選手名", "級", "天気", "風向"]
+# 特徴量に含めない列（キー・ラベル・メタ情報）
+EXCLUDE_FROM_FEATURES = {"選手名", "レース", "開催日", "日目", "算出期間自", "算出期間至", "着", "3連単オッズ", "艇"}
+CATEGORICAL_COLS = ["登番", "モーター", "ボート", "級", "天気", "風向"]
 RELATIVE_BASE_COLS = [
     "展示", "勝率", "2連率", "3連率", "当地勝率", "当地2連率", "当地3連率",
     "モーター勝率", "モーター2連率", "モーター3連率",
@@ -235,7 +248,7 @@ def build_lgb_dataset(df: pd.DataFrame, encoders: dict, *, fit_encoders: bool) -
 
 def load_model() -> tuple[lgb.Booster, dict, list[str]]:
     if not MODEL_PATH.exists():
-        raise FileNotFoundError(f"モデルが見つかりません: {MODEL_PATH}")
+        raise FileNotFoundError(f"モデルが見つかりません: {MODEL_PATH}\n先に train_race_ranker.py を実行してください。")
     if not ENCODER_PATH.exists():
         raise FileNotFoundError(f"エンコーダが見つかりません: {ENCODER_PATH}")
     features = FEATURES
@@ -243,6 +256,135 @@ def load_model() -> tuple[lgb.Booster, dict, list[str]]:
         with open(CONFIG_PATH, encoding="utf-8") as f:
             features = json.load(f).get("features", FEATURES)
     return lgb.Booster(model_file=str(MODEL_PATH)), joblib.load(ENCODER_PATH), features
+
+
+def predict_boat_scores(
+    model: lgb.Booster,
+    df: pd.DataFrame,
+    encoders: dict,
+    *,
+    feature_names: list[str] | None = None,
+) -> np.ndarray:
+    """全行のランキングスコアを一括推論"""
+    feature_names = feature_names or FEATURES
+    x, _, _, _, _ = prepare_dataset(df, encoders, fit_encoders=False, feature_names=feature_names)
+    return model.predict(x)
+
+
+def predict_race_trifecta(
+    race_scores: np.ndarray,
+    boats: list[int] | None = None,
+) -> tuple[dict[tuple[int, int, int], float], list[tuple[tuple[int, int, int], float, int]]]:
+    """1レース分のスコア → Plackett–Luce 120通り確率"""
+    return predict_trifecta_from_scores(race_scores, boats=boats)
+
+
+def evaluate_model(
+    model: lgb.Booster,
+    df: pd.DataFrame,
+    encoders: dict,
+    label: str,
+    *,
+    feature_names: list[str] | None = None,
+    output_dir: Path | None = None,
+) -> tuple[dict, pd.DataFrame, pd.DataFrame]:
+    """6艇ランキング + Plackett–Luce 3連単の総合評価"""
+    feature_names = feature_names or FEATURES
+    sorted_df = df.sort_values(RACE_KEY + ["艇"])
+    scores = predict_boat_scores(model, sorted_df, encoders, feature_names=feature_names)
+
+    hits = {n: 0 for n in TOP_N_LIST}
+    ndcg1_sum = 0.0
+    ndcg3_sum = 0.0
+    n_races = 0
+    race_rows: list[dict] = []
+    detail_rows: list[dict] = []
+
+    offset = 0
+    for key, race_df in sorted_df.groupby(RACE_KEY, sort=False):
+        if len(race_df) != 6:
+            continue
+        race_scores = scores[offset : offset + 6]
+        offset += 6
+        boats = race_df["艇"].astype(int).tolist()
+        relevance = (7 - race_df["着"].astype(int)).to_numpy()
+
+        ndcg1 = compute_ndcg_at_k(race_scores, relevance, 1)
+        ndcg3 = compute_ndcg_at_k(race_scores, relevance, 3)
+        ndcg1_sum += ndcg1
+        ndcg3_sum += ndcg3
+
+        actual = get_actual_trifecta(race_df)
+        prob_map, ranking = predict_race_trifecta(race_scores, boats=boats)
+        total_prob = prob_sum(prob_map)
+        top_combos = [combo for combo, _, _ in ranking]
+
+        hit_rank = next((r for combo, _, r in ranking if combo == actual), None)
+        actual_prob = prob_map.get(actual, 0.0)
+
+        for n in TOP_N_LIST:
+            if hit_rank is not None and hit_rank <= n:
+                hits[n] += 1
+        n_races += 1
+
+        race_rows.append({
+            "開催日": key[0],
+            "日目": key[1],
+            "レース": key[2],
+            "実際3連単": combo_to_str(actual),
+            "予測3連単": combo_to_str(top_combos[0]),
+            "予測確率": ranking[0][1],
+            "的中組み合わせ予測確率": actual_prob,
+            "的中組み合わせ予測順位": hit_rank if hit_rank is not None else "圏外",
+            "確率合計": total_prob,
+            "NDCG@1": ndcg1,
+            "NDCG@3": ndcg3,
+        })
+
+        for combo, prob, rank in ranking:
+            detail_rows.append({
+                "開催日": key[0],
+                "日目": key[1],
+                "レース": key[2],
+                "3連単": combo_to_str(combo),
+                "予測確率": prob,
+                "予測順位": rank,
+            })
+
+    if n_races == 0:
+        raise ValueError(f"評価対象レースがありません: {label}")
+
+    metrics = {
+        "label": label,
+        "n_races": n_races,
+        "ndcg_at_1": ndcg1_sum / n_races,
+        "ndcg_at_3": ndcg3_sum / n_races,
+        **{f"trifecta_top{n}_rate": hits[n] / n_races for n in TOP_N_LIST},
+    }
+
+    print(f"\n=== 評価 ({label}) ===")
+    print(f"  レース数: {n_races}")
+    print(f"  NDCG@1: {metrics['ndcg_at_1']:.6f}")
+    print(f"  NDCG@3: {metrics['ndcg_at_3']:.6f}")
+    for n in TOP_N_LIST:
+        print(f"  3連単 TOP{n} 的中率: {metrics[f'trifecta_top{n}_rate']:.2%}")
+
+    race_df_out = pd.DataFrame(race_rows)
+    detail_df_out = pd.DataFrame(detail_rows)
+
+    if output_dir is not None:
+        output_dir.mkdir(parents=True, exist_ok=True)
+        eval_path = output_dir / "評価結果.csv"
+        pred_path = output_dir / "予測結果.csv"
+        detail_path = output_dir / "予測結果_120通り.csv"
+        pd.DataFrame([metrics]).to_csv(eval_path, index=False, encoding="UTF-8-sig")
+        race_df_out.to_csv(pred_path, index=False, encoding="UTF-8-sig")
+        detail_df_out.to_csv(detail_path, index=False, encoding="UTF-8-sig")
+        print(f"  評価結果CSV: {eval_path}")
+        print(f"  予測結果CSV: {pred_path}")
+        print(f"  120通りCSV: {detail_path}")
+
+    return metrics, race_df_out, detail_df_out
 
 
 def evaluate_trifecta(
@@ -254,60 +396,16 @@ def evaluate_trifecta(
     feature_names: list[str] | None = None,
     output_path: Path | None = None,
 ) -> tuple[dict, pd.DataFrame]:
-    feature_names = feature_names or FEATURES
-    x, _, _, _, _ = prepare_dataset(df, encoders, fit_encoders=False, feature_names=feature_names)
-    scores = model.predict(x)
-
-    hits = {n: 0 for n in TOP_N_LIST}
-    n_races = 0
-    offset = 0
-    pred_rows: list[dict] = []
-
-    for key, race_df in df.groupby(RACE_KEY, sort=False):
-        if len(race_df) != 6:
-            continue
-        race_scores = scores[offset : offset + 6]
-        offset += 6
-
-        actual = get_actual_trifecta(race_df)
-        prob_map = calc_trifecta_probs_from_scores(race_scores)
-        ranking = sorted(prob_map.items(), key=lambda item: item[1], reverse=True)
-        top_combos = [combo for combo, _ in ranking]
-        hit_rank = top_combos.index(actual) + 1 if actual in top_combos else None
-
-        for n in TOP_N_LIST:
-            if hit_rank is not None and hit_rank <= n:
-                hits[n] += 1
-        n_races += 1
-
-        pred_rows.append({
-            "開催日": key[0],
-            "日目": key[1],
-            "レース": key[2],
-            "実際3連単": "-".join(map(str, actual)),
-            "予測3連単": "-".join(map(str, top_combos[0])),
-            "予測確率": ranking[0][1],
-            "的中順位": hit_rank if hit_rank is not None else "圏外",
-        })
-
-    if n_races == 0:
-        raise ValueError(f"評価対象レースがありません: {label}")
-
-    metrics = {
-        "label": label,
-        "n_races": n_races,
-        **{f"trifecta_top{n}_rate": hits[n] / n_races for n in TOP_N_LIST},
-    }
-    print(f"\n=== 3連単評価 ({label}) ===")
-    print(f"  レース数: {n_races}")
-    for n in TOP_N_LIST:
-        print(f"  3連単 TOP{n} 的中率: {hits[n] / n_races:.2%}")
-
-    if output_path is not None:
+    """後方互換ラッパー"""
+    output_dir = output_path.parent if output_path is not None else None
+    metrics, race_df, _ = evaluate_model(
+        model, df, encoders, label,
+        feature_names=feature_names,
+        output_dir=output_dir,
+    )
+    if output_path is not None and output_path.name != "評価結果.csv":
         pd.DataFrame([metrics]).to_csv(output_path, index=False, encoding="UTF-8-sig")
-        print(f"  評価結果CSV: {output_path}")
-
-    return metrics, pd.DataFrame(pred_rows)
+    return metrics, race_df
 
 
 def save_shap_importance(
@@ -506,7 +604,8 @@ def train_model(df: pd.DataFrame) -> tuple[lgb.Booster, dict, dict]:
     )
 
     summary = {
-        "model": "レース着順ランキング",
+        "model": "6艇ランキング_3連単予想",
+        "pipeline": "LightGBM Ranker → Plackett–Luce",
         "train_years": list(TRAIN_YEARS),
         "n_races": len(df) // 6,
         "optuna_valid_year": optuna_valid_year,
@@ -547,12 +646,12 @@ def main() -> None:
     print(f"  平均 NDCG@3: {summary['walk_forward_mean_ndcg_at_3']:.6f}")
 
     valid_year = summary["optuna_valid_year"]
-    evaluate_trifecta(
+    evaluate_model(
         model,
         subset_years(df, [valid_year]),
         encoders,
         f"検証{valid_year}",
-        output_path=EVALUATION_CSV_PATH,
+        output_dir=OUTPUT_DIR,
     )
 
     print("\nSHAP分析")
@@ -563,7 +662,7 @@ def main() -> None:
         x_sample,
         SHAP_BEESWARM_PNG,
         SHAP_WATERFALL_PNG,
-        title="レース着順ランキングモデル",
+        title="6艇ランキング_3連単予想",
     )
     save_shap_importance(model, x_sample, SHAP_IMPORTANCE_PNG, SHAP_IMPORTANCE_CSV)
 
@@ -579,6 +678,8 @@ def main() -> None:
     print(f"  {WALK_FORWARD_CSV_PATH}")
     print(f"  {LEARNING_CURVE_PNG}")
     print(f"  {EVALUATION_CSV_PATH}")
+    print(f"  {PREDICTIONS_CSV_PATH}")
+    print(f"  {PREDICTIONS_DETAIL_CSV_PATH}")
     print(f"  {SHAP_BEESWARM_PNG}")
     print(f"  {SHAP_WATERFALL_PNG}")
     print(f"  {SHAP_IMPORTANCE_PNG}")

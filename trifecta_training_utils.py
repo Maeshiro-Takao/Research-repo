@@ -194,22 +194,9 @@ def calc_trifecta_probs_boat1_fixed(
 
 
 def calc_trifecta_probs_from_scores(scores: np.ndarray) -> dict[tuple[int, int, int], float]:
-    """全6艇モデル: exp() による3連単確率（現在方式）"""
-    n = len(scores)
-    exp_scores = np.exp(scores - scores.max())
-    results: dict[tuple[int, int, int], float] = {}
-    for i in range(n):
-        p1 = max(exp_scores[i] / exp_scores.sum(), 1e-12)
-        rem1 = [b for b in range(n) if b != i]
-        sum_rem1 = exp_scores[rem1].sum()
-        for j in rem1:
-            p2 = max(exp_scores[j] / sum_rem1, 1e-12)
-            rem2 = [b for b in rem1 if b != j]
-            sum_rem2 = exp_scores[rem2].sum()
-            for k in rem2:
-                p3 = max(exp_scores[k] / sum_rem2, 1e-12)
-                results[(i + 1, j + 1, k + 1)] = p1 * p2 * p3
-    return results
+    """全6艇モデル: Plackett–Luce による3連単確率（後方互換ラッパー）"""
+    from plackett_luce import plackett_luce_trifecta_probs
+    return plackett_luce_trifecta_probs(scores)
 
 
 def build_rank_trifecta_boat1_fixed(
@@ -436,11 +423,39 @@ def train_incremental_by_year(
     return model, encoders, x_train, meta
 
 
-def _resolve_base_value(explainer: shap.TreeExplainer):
+def _resolve_base_value(explainer: shap.TreeExplainer, class_idx: int | None = None) -> float:
     expected = explainer.expected_value
     if isinstance(expected, (list, np.ndarray)):
-        return float(np.asarray(expected).reshape(-1)[0])
+        values = np.asarray(expected).reshape(-1)
+        if class_idx is not None:
+            return float(values[class_idx])
+        return float(values[0])
     return float(expected)
+
+
+def _predicted_classes(model: lgb.Booster, x_sample: pd.DataFrame) -> np.ndarray | None:
+    preds = np.asarray(model.predict(x_sample))
+    if preds.ndim == 2 and preds.shape[1] > 1:
+        return np.argmax(preds, axis=1)
+    return None
+
+
+def _shap_row_for_waterfall(shap_values, sample_idx: int, class_idx: int) -> np.ndarray:
+    if isinstance(shap_values, list):
+        return np.asarray(shap_values[class_idx][sample_idx])
+    arr = np.asarray(shap_values)
+    if arr.ndim == 3:
+        return arr[sample_idx, :, class_idx]
+    return arr[sample_idx]
+
+
+def _shap_values_for_summary(shap_values):
+    if isinstance(shap_values, list):
+        return shap_values
+    arr = np.asarray(shap_values)
+    if arr.ndim == 3:
+        return [arr[:, :, c] for c in range(arr.shape[2])]
+    return arr
 
 
 def run_shap_analysis(
@@ -453,8 +468,8 @@ def run_shap_analysis(
     """
     SHAP分析を出力する。
 
-    - Summary Plot (Beeswarm): 日本語特徴量名
-    - Waterfall Plot: 代表サンプル1件、日本語特徴量名
+    - Summary Plot (Beeswarm): 日本語特徴量名（多クラス対応）
+    - Waterfall Plot: 代表サンプル1件（予測クラスの SHAP）
     """
     x_sample = x_sample.copy()
     feature_names = [str(c) for c in x_sample.columns]
@@ -462,12 +477,12 @@ def run_shap_analysis(
 
     explainer = shap.TreeExplainer(model)
     shap_values = explainer.shap_values(x_sample)
-    if isinstance(shap_values, list):
-        shap_values = shap_values[0]
+    pred_classes = _predicted_classes(model, x_sample)
+    plot_values = _shap_values_for_summary(shap_values)
 
     plt.figure(figsize=(10, 8))
     shap.summary_plot(
-        shap_values,
+        plot_values,
         x_sample,
         feature_names=feature_names,
         show=False,
@@ -479,9 +494,10 @@ def run_shap_analysis(
     plt.close()
 
     sample_idx = min(len(x_sample) // 2, len(x_sample) - 1)
+    class_idx = int(pred_classes[sample_idx]) if pred_classes is not None else 0
     explanation = shap.Explanation(
-        values=shap_values[sample_idx],
-        base_values=_resolve_base_value(explainer),
+        values=_shap_row_for_waterfall(shap_values, sample_idx, class_idx),
+        base_values=_resolve_base_value(explainer, class_idx if pred_classes is not None else None),
         data=x_sample.iloc[sample_idx].values,
         feature_names=feature_names,
     )
