@@ -16,7 +16,7 @@
   ],
   "n_races": 24175,
   "optuna_valid_year": 2024,
-  "optuna_best_ndcg_at_1": 0.5416609153701285,
+  "optuna_best_ndcg_at_1": 0.5413931063401662,
   "walk_forward_folds": [
     {
       "train_years": "2014-2020",
@@ -40,48 +40,48 @@
       "label": "学習2014-2020→検証2021",
       "valid_year": 2021,
       "train_years": "2014-2020",
-      "best_iteration": 24,
-      "ndcg_at_1": 0.5440332609820305,
-      "ndcg_at_3": 0.6909032171090105
+      "best_iteration": 46,
+      "ndcg_at_1": 0.5459859033700782,
+      "ndcg_at_3": 0.6946967965062772
     },
     {
       "label": "学習2014-2021→検証2022",
       "valid_year": 2022,
       "train_years": "2014-2021",
-      "best_iteration": 38,
-      "ndcg_at_1": 0.5463585694127537,
-      "ndcg_at_3": 0.6886168637478391
+      "best_iteration": 42,
+      "ndcg_at_1": 0.5453961350193037,
+      "ndcg_at_3": 0.6875750160936949
     },
     {
       "label": "学習2014-2022→検証2023",
       "valid_year": 2023,
       "train_years": "2014-2022",
-      "best_iteration": 32,
-      "ndcg_at_1": 0.5404313007879794,
-      "ndcg_at_3": 0.6772309225825479
+      "best_iteration": 49,
+      "ndcg_at_1": 0.5423354106241571,
+      "ndcg_at_3": 0.6799879713464919
     },
     {
       "label": "学習2014-2023→検証2024",
       "valid_year": 2024,
       "train_years": "2014-2023",
-      "best_iteration": 11,
-      "ndcg_at_1": 0.5416609153701285,
-      "ndcg_at_3": 0.6809693044429661
+      "best_iteration": 75,
+      "ndcg_at_1": 0.5413931063401662,
+      "ndcg_at_3": 0.6844316233800861
     }
   ],
-  "walk_forward_mean_ndcg_at_1": 0.543121011638223,
-  "walk_forward_mean_ndcg_at_3": 0.6844300769705909,
+  "walk_forward_mean_ndcg_at_1": 0.5437776388384263,
+  "walk_forward_mean_ndcg_at_3": 0.6866728518316375,
   "best_params": {
-    "num_leaves": 19,
+    "num_leaves": 85,
     "max_depth": 4,
-    "learning_rate": 0.09542827979454291,
-    "min_data_in_leaf": 123,
-    "feature_fraction": 0.9442545976490065,
-    "bagging_fraction": 0.8858404667739922,
+    "learning_rate": 0.09040782990893115,
+    "min_data_in_leaf": 72,
+    "feature_fraction": 0.9088449438194254,
+    "bagging_fraction": 0.8253607039603009,
     "bagging_freq": 2,
-    "lambda_l1": 0.0345483424065225,
-    "lambda_l2": 0.21172571605486024,
-    "num_boost_round": 170
+    "lambda_l1": 0.5044528807510905,
+    "lambda_l2": 0.029104186691466253,
+    "num_boost_round": 292
   },
   "n_trials": 25,
   "num_boost_round": 50,
@@ -191,14 +191,14 @@
     "verbosity": -1,
     "seed": 42,
     "feature_pre_filter": false,
-    "num_leaves": 19,
+    "num_leaves": 85,
     "max_depth": 4,
-    "learning_rate": 0.09542827979454291,
-    "min_data_in_leaf": 123,
-    "feature_fraction": 0.9442545976490065,
-    "bagging_fraction": 0.8858404667739922,
+    "learning_rate": 0.09040782990893115,
+    "min_data_in_leaf": 72,
+    "feature_fraction": 0.9088449438194254,
+    "bagging_fraction": 0.8253607039603009,
     "bagging_freq": 2,
-    "lambda_l1": 0.0345483424065225,
-    "lambda_l2": 0.21172571605486024
+    "lambda_l1": 0.5044528807510905,
+    "lambda_l2": 0.029104186691466253
   }
 }
